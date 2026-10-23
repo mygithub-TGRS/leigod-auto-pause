@@ -1,0 +1,2 @@
+# 只提供结构化模板，避免出现没有版本/复现步骤的零信息 Issue。
+blank_issues_enabled: false

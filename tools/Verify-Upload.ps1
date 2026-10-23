@@ -42,8 +42,10 @@ try {
         @{ Pattern = '\.dmp$';                                    Reason = '内存转储' },
         @{ Pattern = '\.snapshot\.png$';                          Reason = '本地界面截图' },
         @{ Pattern = '^docs/_audit/';                             Reason = '本地审计测量产物' },
+        @{ Pattern = '^dist/';                                    Reason = '发布包产物与暂存目录' },
         @{ Pattern = '\.(pfx|p12|pem|key|ppk|pk8|jks|keystore)$'; Reason = '证书或私钥' },
-        @{ Pattern = '\.(zip|7z|rar)$';                           Reason = '打包产物' }
+        @{ Pattern = '\.(zip|7z|rar)$';                           Reason = '打包产物' },
+        @{ Pattern = '\.sha256$';                                 Reason = '发布包校验文件' }
     )
     foreach ($path in $tracked) {
         foreach ($rule in $forbiddenRules) {

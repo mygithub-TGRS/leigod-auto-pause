@@ -1,0 +1,30 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.md]
+trim_trailing_whitespace = false
+end_of_line = lf
+
+[*.{json,yml,yaml}]
+end_of_line = lf
+indent_size = 2
+
+[*.cs]
+# 编译器只支持 C# 5；不要在编辑器里自动套用需要新语法的重构。
+# 源文件按 UTF-8 编译（tools\Build.ps1 显式传 /codepage:65001），不强制 BOM。
+charset = utf-8
+
+[*.ps1]
+# Windows PowerShell 5.1 必须靠 BOM 识别中文；缺 BOM 会让文案乱码甚至语法错误。
+# tools\Test.ps1 会强制检查这一条。
+charset = utf-8-bom
+
+[*.xaml]
+indent_size = 4

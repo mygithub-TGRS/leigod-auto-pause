@@ -6,7 +6,7 @@
 
 本项目在用户的 Windows 设备上运行，不运营由项目维护者控制的后端、遥测、广告或自动更新服务。维护者不会自动收到用户的 Token、配置或运行日志。
 
-当前版本会读取雷神客户端本地日志中的 `account_token`，并将其发送到源码固定列明的雷神 HTTPS 主机，以查询账号状态和执行暂停。打开控制台后会立即查询一次，正常打开期间约每 30 秒再次查询；启动后台监控后，会按配置的状态轮询间隔查询。
+当前版本会读取雷神客户端本地日志中的 `account_token`，并将其发送到源码固定列明的雷神 HTTPS 主机，以查询账号状态和执行暂停。该读取与请求由后台监控脚本完成：控制台进程本身不解析、不保存 Token，只读取监控写入的短期状态；当监控未运行或状态文件已过期时，控制台会调用监控脚本做一次探测（约每 30 秒最多一次）。启动后台监控后，会按配置的状态轮询间隔查询。
 
 ## 处理的数据
 
@@ -17,7 +17,7 @@
 | 账号状态 | 雷神接口响应 | 决定是否可以安全暂停 | 本项目运行日志记录 `Active`、`Paused` 或 `Unknown` | 不发送给项目维护者 |
 | 时间、客户端/游戏事件、倒计时、结果代码、错误类别 | 本机运行过程 | 状态显示和故障排查 | `app\logs\monitor-YYYY-MM-DD.log` | 不发送给项目维护者 |
 | 客户端和配置路径 | 本机配置 | 定位客户端日志和配置 | `app\config.json`；诊断默认只显示末级名称 | 不发送给项目维护者 |
-| 网络元数据（源 IP、TLS/HTTP 元数据、默认 User-Agent 等） | 操作系统网络栈和 PowerShell | 建立 HTTPS 请求 | 本项目不主动保存 | 雷神端点可见；代理或其他网络中介按环境可见 |
+| 网络元数据（源 IP、TLS/HTTP 元数据、默认 User-Agent 等） | 操作系统网络栈和后台监控的 PowerShell 进程 | 建立 HTTPS 请求 | 本项目不主动保存 | 雷神端点可见；代理或其他网络中介按环境可见 |
 | Windows 通知内容 | 本工具状态事件 | 提示倒计时或暂停结果 | 本项目不另行保存；Windows 可能保留通知历史 | 不发送给项目维护者 |
 
 雷神客户端原始日志由第三方客户端生成，可能包含本项目没有创建的其他账号或设备信息。本工具只读取最近 5 个 `http-*.log` 文件各自末尾最多 5000 行，并只接受 HTTPS `leigod.com` 域名 URL 中符合长度限制的 `account_token`。自动识别还会读取最近的 `main-*.log` 尾部并持续读取新增完整行，但只解析结构匹配的 `launch-local-game` 事件；事件外的原始字段不会写入本项目文件。
@@ -39,7 +39,8 @@
 - `app\logs\monitor-*.log`：按日创建并追加，默认保留最近 30 天（`log_retention_days`，范围 0-3650，设为 `0` 关闭自动清理）；过期文件由后台监控在启动时和每日首次巡检时删除；
 - `app\logs\runtime-state.json`：后台监控运行时保存的短期界面状态（监控状态、账号状态与上次检查时刻、游戏/进程名、倒计时截止时间、最近一次暂停结论与错误类别），不含 Token、请求 URL 和本机路径；正常退出时删除，异常退出后会因超时失效；
 - `app\.stop`：停止监控时创建，重新启动监控时删除；
-- `LeigodAutoPause.exe`：本地构建产物，不含账号配置，但未签名；
+- `app\logs\ui-error.log`：仅在控制台启动失败或界面快照渲染失败时追加一段异常堆栈与本机路径，用于事后排障；不含 Token、账号标识或日志内容，大小超过 256 KB 时在下次写入前清空；
+- `LeigodAutoPause.exe`：控制台本体，本地构建或发布包中的二进制，不含账号配置；是否带数字签名取决于构建者/发布者，仓库不提供证书；
 - Windows 通知：启用通知时，标题和状态摘要可能进入系统通知历史；清理方式由 Windows 设置控制；
 - 卸载开机自启不会删除配置、日志或桌面入口。
 
@@ -49,6 +50,7 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\app\Stop-Monitor.ps1
 Remove-Item -Path .\app\logs\monitor-*.log -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath .\app\logs\runtime-state.json -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath .\app\logs\ui-error.log -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath .\app\config.json -Force -ErrorAction SilentlyContinue
 ```
 

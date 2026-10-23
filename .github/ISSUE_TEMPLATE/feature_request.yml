@@ -1,0 +1,38 @@
+name: 功能建议
+description: 提出一个改进想法（不承诺实现，也不接受新增遥测/云同步类需求）
+title: "[idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本项目有意保持“本机、无后端、保守失败”。以下方向通常不会被接受：
+        上传账号数据或日志到维护者服务器、云同步、自动更新、绕过计费或账号限制、
+        把工具描述为官方或已获授权。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题
+      description: 描述场景与痛点，而不是先给方案。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的改动
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: 对“保守失败”的影响
+      description: 这个改动会不会让工具在状态不确定时更容易执行暂停？如果会，请说明为什么仍然安全。
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: 确认
+      options:
+        - label: 这个建议不依赖把账号数据或日志发送到维护者控制的服务器。
+          required: true
