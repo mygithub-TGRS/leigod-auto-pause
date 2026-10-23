@@ -691,6 +691,20 @@
                                     </StackPanel>
                                 </Button>
                             </Grid>
+                        </Border>                        <Border x:Name="DiagNavHost" Background="Transparent" CornerRadius="10" Margin="0,0,0,3">
+                            <Grid>
+                                <Border x:Name="DiagIndicator" Width="3" Height="16" CornerRadius="2" Background="{StaticResource GreenBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="1,0,0,0" Visibility="Collapsed">
+                                    <Border.Effect>
+                                        <DropShadowEffect Color="#0EFDD3" BlurRadius="8" ShadowDepth="0" Direction="0" Opacity="0.7" RenderingBias="Performance" />
+                                    </Border.Effect>
+                                </Border>
+                                <Button x:Name="DiagNavButton" Style="{StaticResource NavButtonStyle}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE9D9;" FontSize="14" Margin="0,0,12,0" VerticalAlignment="Center" />
+                                        <TextBlock Text="诊断" FontSize="13" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
                         </Border>
                     </StackPanel>
 
@@ -961,6 +975,7 @@
                                 </Grid>
 
                                 <Border Grid.Row="4" Background="{StaticResource InsetBrush}" BorderBrush="#182427" BorderThickness="1" CornerRadius="10" Padding="4">
+                                    <Grid>
                                     <ListView x:Name="GameList" ScrollViewer.HorizontalScrollBarVisibility="Auto">
                                         <ListView.View>
                                             <GridView>
@@ -969,6 +984,8 @@
                                             </GridView>
                                         </ListView.View>
                                     </ListView>
+                                    <TextBlock x:Name="GameEmptyText" Text="尚未添加补充进程" FontSize="11" Foreground="{StaticResource WeakBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" />
+                                </Grid>
                                 </Border>
 
                                 <Button x:Name="RemoveProcessButton" Grid.Row="6" Style="{StaticResource FlatButtonStyle}" HorizontalAlignment="Left" ToolTip="移除选中的进程">
@@ -999,9 +1016,9 @@
                                             <ColumnDefinition Width="8" />
                                             <ColumnDefinition Width="38" />
                                         </Grid.ColumnDefinitions>
-                                        <Button x:Name="ExitGraceMinusButton" AutomationProperties.Name="减少游戏退出宽限" Grid.Column="0" Style="{StaticResource IconButtonStyle}" Content="&#xE738;" FontSize="11" ToolTip="减少 30 秒" />
+                                        <Button x:Name="ExitGraceMinusButton" AutomationProperties.Name="减少游戏退出宽限" Grid.Column="0" Style="{StaticResource IconButtonStyle}" Content="&#xE738;" FontSize="12" ToolTip="减少 10 秒" />
                                         <TextBox x:Name="ExitGraceInput" Grid.Column="2" Style="{StaticResource DarkTextBoxStyle}" TextAlignment="Center" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource GreenBrush}" />
-                                        <Button x:Name="ExitGracePlusButton" AutomationProperties.Name="增加游戏退出宽限" Grid.Column="4" Style="{StaticResource IconButtonStyle}" Content="&#xE710;" FontSize="11" ToolTip="增加 30 秒" />
+                                        <Button x:Name="ExitGracePlusButton" AutomationProperties.Name="增加游戏退出宽限" Grid.Column="4" Style="{StaticResource IconButtonStyle}" Content="&#xE710;" FontSize="12" ToolTip="增加 10 秒" />
                                     </Grid>
 
                                     <TextBlock Text="启动观察期（秒）" FontSize="11" Foreground="{StaticResource WeakBrush}" Margin="0,12,0,6" />
@@ -1013,9 +1030,9 @@
                                             <ColumnDefinition Width="8" />
                                             <ColumnDefinition Width="38" />
                                         </Grid.ColumnDefinitions>
-                                        <Button x:Name="StartupGraceMinusButton" AutomationProperties.Name="减少启动观察期" Grid.Column="0" Style="{StaticResource IconButtonStyle}" Content="&#xE738;" FontSize="11" ToolTip="减少 30 秒" />
+                                        <Button x:Name="StartupGraceMinusButton" AutomationProperties.Name="减少启动观察期" Grid.Column="0" Style="{StaticResource IconButtonStyle}" Content="&#xE738;" FontSize="12" ToolTip="减少 10 秒" />
                                         <TextBox x:Name="StartupGraceInput" Grid.Column="2" Style="{StaticResource DarkTextBoxStyle}" TextAlignment="Center" FontSize="14" FontWeight="SemiBold" Foreground="{StaticResource GreenBrush}" />
-                                        <Button x:Name="StartupGracePlusButton" AutomationProperties.Name="增加启动观察期" Grid.Column="4" Style="{StaticResource IconButtonStyle}" Content="&#xE710;" FontSize="11" ToolTip="增加 30 秒" />
+                                        <Button x:Name="StartupGracePlusButton" AutomationProperties.Name="增加启动观察期" Grid.Column="4" Style="{StaticResource IconButtonStyle}" Content="&#xE710;" FontSize="12" ToolTip="增加 10 秒" />
                                     </Grid>
 
                                     <Border Margin="0,14,0,0" Padding="0,7" BorderThickness="0,0,0,1" BorderBrush="{StaticResource HairlineBrush}">
@@ -1105,6 +1122,69 @@
                             <TextBox x:Name="LogTextBox" Style="{StaticResource LogTextBoxStyle}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
                         </Grid>
                     </Border>
+                </Grid>
+                <!-- ============================ Diagnostics ============================ -->
+                <Grid x:Name="DiagPanel" Margin="24,20,24,20" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="14" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="3" Height="25" CornerRadius="2" VerticalAlignment="Center" Background="{StaticResource GreenBrush}" Opacity="0.85" />
+                        <StackPanel Grid.Column="1" Margin="12,0,0,0">
+                            <TextBlock Text="诊断" FontSize="21" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" />
+                            <TextBlock Text="读取本机状态，并解释为什么没有自动暂停" FontSize="11" Foreground="{StaticResource WeakBrush}" Margin="0,3,0,0" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Button x:Name="DiagRunButton" Style="{StaticResource PrimaryButtonStyle}" Height="38" MinHeight="38" Padding="16,0" Content="运行诊断" AutomationProperties.Name="运行诊断" />
+                            <Button x:Name="DiagCopyButton" Style="{StaticResource IconButtonStyle}" Content="&#xE8C8;" Margin="8,0,0,0" ToolTip="复制排障报告" AutomationProperties.Name="复制排障报告" />
+                        </StackPanel>
+                    </Grid>
+
+                    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
+                        <StackPanel>
+                            <Border Style="{StaticResource CardStyle}" Padding="16,14">
+                                <StackPanel>
+                                    <TextBlock Text="当前状态" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock x:Name="DiagSummaryText" FontSize="12" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                    <Grid Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="96" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <TextBlock Grid.Row="0" Text="登录凭据" FontSize="11" Foreground="{StaticResource WeakBrush}" Margin="0,0,0,7" />
+                                        <TextBlock x:Name="DiagTokenText" Grid.Row="0" Grid.Column="1" FontSize="12" Foreground="{StaticResource TextBrush}" Margin="0,0,0,7" TextWrapping="Wrap" />
+                                        <TextBlock Grid.Row="1" Text="账号时长" FontSize="11" Foreground="{StaticResource WeakBrush}" Margin="0,0,0,7" />
+                                        <TextBlock x:Name="DiagAccountText" Grid.Row="1" Grid.Column="1" FontSize="12" Foreground="{StaticResource TextBrush}" Margin="0,0,0,7" TextWrapping="Wrap" />
+                                        <TextBlock Grid.Row="2" Text="雷神客户端" FontSize="11" Foreground="{StaticResource WeakBrush}" Margin="0,0,0,7" />
+                                        <TextBlock x:Name="DiagClientText" Grid.Row="2" Grid.Column="1" FontSize="12" Foreground="{StaticResource TextBrush}" Margin="0,0,0,7" TextWrapping="Wrap" />
+                                        <TextBlock Grid.Row="3" Text="目标游戏" FontSize="11" Foreground="{StaticResource WeakBrush}" />
+                                        <TextBlock x:Name="DiagGameText" Grid.Row="3" Grid.Column="1" FontSize="12" Foreground="{StaticResource TextBrush}" TextWrapping="Wrap" />
+                                    </Grid>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource CardStyle}" Padding="16,14" Margin="0,14,0,0">
+                                <StackPanel>
+                                    <TextBlock Text="建议" Style="{StaticResource SectionTitleStyle}" />
+                                    <TextBlock x:Name="DiagAdviceText" FontSize="12" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
                 </Grid>
             </Grid>
 

@@ -1058,7 +1058,8 @@ function Write-MonitorRuntimeState {
         $PauseRetryDeadlineAt = $null,
         [string]$LastDecision = "",
         $LastDecisionAt = $null,
-        [string]$LastError = ""
+        [string]$LastError = "",
+        [datetime]$StateEnteredAt = [datetime]::MinValue
     )
 
     $signature = "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $State, $AccountState, $Activity.LaunchPending, $Activity.UnresolvedLaunch, ($Activity.TargetProcesses -join ","), ($Activity.RunningGames -join ","), $LastDecision, $PausePhase
@@ -1082,6 +1083,7 @@ function Write-MonitorRuntimeState {
         monitor_pid             = $PID
         session_id              = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
         state                   = $State
+        state_entered_at        = (Format-UtcTimestamp -Value $(if ($StateEnteredAt -eq [datetime]::MinValue) { $null } else { $StateEnteredAt }))
         account_state           = $AccountState
         account_checked_at      = (Format-UtcTimestamp -Value $(if ($AccountCheckedAt -eq [datetime]::MinValue) { $null } else { $AccountCheckedAt }))
         account_message         = $AccountMessage
@@ -1611,6 +1613,8 @@ function Start-LeigodMonitor {
         $lastLogPruneDate = [datetime]::MinValue
         # 界面对齐用的结构化状态：账号检查时刻、最近一次暂停结论、最近一次错误。
         $accountCheckedAt = [datetime]::MinValue
+        $stateEnteredAt = Get-Date
+        $lastStateForTimestamp = $state
         $lastDecision = ""
         $lastDecisionAt = $null
         $lastError = ""
@@ -1719,7 +1723,9 @@ function Start-LeigodMonitor {
                 $statusInterval = [math]::Min($statusInterval, 3)
             }
             $statusDue = ($now - $lastStatusCheck).TotalSeconds -ge $statusInterval
-            $needsStatus = $cycle -eq 1 -or $clientRunning -or $gameRunning -or $activity.LaunchPending -or $state -ne "Idle"
+            # 空闲态也保持低频巡检（5 分钟），否则界面的账号状态会一直冻结在最后一次查询结果上。
+            $idleStatusDue = ($now - $lastStatusCheck).TotalSeconds -ge 300
+            $needsStatus = $cycle -eq 1 -or $clientRunning -or $gameRunning -or $activity.LaunchPending -or $state -ne "Idle" -or $idleStatusDue
             $finalCheckReady = $null -ne $deadline -and $now -ge $deadline -and $accountState -eq "Active" -and $token
             if ($needsStatus -and $statusDue -and -not $finalCheckReady) {
                 $freshToken = Get-LatestAccountToken -HttpLogDirectory $HttpLogDirectory
@@ -2016,8 +2022,12 @@ function Start-LeigodMonitor {
 
             # 直接复用本周期开头的 $activity；这里原来又完整跑了一遍 Get-GameActivity
             # （进程枚举 + 加速状态文件读取），属于每个周期都重复一次的劳动。
+            if ($state -ne $lastStateForTimestamp) {
+                $stateEnteredAt = $now
+                $lastStateForTimestamp = $state
+            }
             $runtimePausePhase = $(if ($null -ne $deadline) { $state } else { "" })
-            Write-MonitorRuntimeState -State $state -AccountState $accountState -Activity $activity -AutoDetectionEnabled $Config.AutoDetectLaunchedGames -Force $false -LastSignature ([ref]$lastRuntimeSignature) -LastWriteAt ([ref]$lastRuntimeWriteAt) -AccountCheckedAt $accountCheckedAt -AccountMessage $lastStatusMessage -PausePhase $runtimePausePhase -PauseDeadlineAt $deadline -PauseRetryDeadlineAt $pauseAttemptExpiresAt -LastDecision $lastDecision -LastDecisionAt $lastDecisionAt -LastError $lastError
+            Write-MonitorRuntimeState -State $state -AccountState $accountState -Activity $activity -AutoDetectionEnabled $Config.AutoDetectLaunchedGames -Force $false -LastSignature ([ref]$lastRuntimeSignature) -LastWriteAt ([ref]$lastRuntimeWriteAt) -AccountCheckedAt $accountCheckedAt -AccountMessage $lastStatusMessage -PausePhase $runtimePausePhase -PauseDeadlineAt $deadline -PauseRetryDeadlineAt $pauseAttemptExpiresAt -LastDecision $lastDecision -LastDecisionAt $lastDecisionAt -LastError $lastError -StateEnteredAt $stateEnteredAt
             $lastClientRunning = $clientRunning
             $lastGameRunning = $gameRunning
             if ($CycleLimit -gt 0 -and $cycle -ge $CycleLimit) {

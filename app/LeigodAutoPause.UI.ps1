@@ -7,7 +7,7 @@ param(
         throw "SnapshotPath 必须以 .snapshot.png 结尾，以确保生成文件被 Git 忽略。"
     })]
     [string]$SnapshotPath = "",
-    [ValidateSet("Overview", "Settings", "Logs")][string]$InitialPanel = "Overview",
+    [ValidateSet("Overview", "Settings", "Logs", "Diag")][string]$InitialPanel = "Overview",
     [ValidateRange(0, 300)][int]$AutoCloseSeconds = 0
 )
 
@@ -82,7 +82,10 @@ try {
         "SettingsHintText", "SaveSettingsButton", "OpenLogFolderButton", "RefreshLogButton",
         "LogTextBox", "FooterMessageText",
         "VerdictBar", "VerdictIcon", "VerdictText", "FreshnessText", "CountdownText", "LastDecisionText",
-        "LogSourceText", "LogMatchCountText", "LogSearchInput", "LogLevelCombo", "LogCopyButton"
+        "LogSourceText", "LogMatchCountText", "LogSearchInput", "LogLevelCombo", "LogCopyButton",
+        "DiagNavHost", "DiagIndicator", "DiagNavButton", "DiagPanel", "DiagRunButton", "DiagCopyButton",
+        "DiagSummaryText", "DiagTokenText", "DiagAccountText", "DiagClientText", "DiagGameText", "DiagAdviceText",
+        "GameEmptyText"
     )
     foreach ($controlName in $controlNames) {
         $control = $window.FindName($controlName)
@@ -396,6 +399,7 @@ try {
                 $GameList.SelectedItem = $item
             }
         }
+        $GameEmptyText.Visibility = $(if ($script:GameNames.Count -eq 0) { "Visible" } else { "Collapsed" })
     }
 
     function Update-RuleSummary {
@@ -575,18 +579,23 @@ try {
     }
 
     function Start-StatusProbe {
+        param([switch]$Force)
+
         if (-not $script:StatusProbeEnabled) {
             return
         }
         # 后台监控运行时，runtime-state.json 里已经带着 account_state，界面直接读即可；
         # 但状态文件过期（监控卡住或刚重启）时必须自己探测兜底，否则界面会一直显示旧值。
-        if ($script:MonitorInstanceState -eq "Running") {
+        if (-not $Force -and $script:MonitorInstanceState -eq "Running") {
             $liveState = Get-CurrentRuntimeState
             if ($null -ne $liveState) {
                 return
             }
         }
-        if ($null -ne $script:ProbeProcess -or (Get-Date) -lt $script:NextProbeAt) {
+        if ($null -ne $script:ProbeProcess) {
+            return
+        }
+        if (-not $Force -and (Get-Date) -lt $script:NextProbeAt) {
             return
         }
         $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File $(Quote-ProcessArgument -Value $script:MonitorScript) -ConfigPath $(Quote-ProcessArgument -Value $script:ConfigPath) -CheckJson"
@@ -937,16 +946,81 @@ try {
         Update-RuleSummary
     }
 
+    function Update-DiagView {
+        $probe = $script:LastProbeData
+        if ($null -eq $probe) {
+            $DiagSummaryText.Text = "还没有诊断结果。点击「运行诊断」读取本机状态（只读，不会发送暂停请求）。"
+            $DiagTokenText.Text = "—"
+            $DiagAccountText.Text = "—"
+            $DiagClientText.Text = "—"
+            $DiagGameText.Text = "—"
+            $DiagAdviceText.Text = "诊断只读取四件事：登录凭据是否存在、账号是否在计时、雷神客户端是否在运行、目标游戏是否已识别。"
+            return
+        }
+
+        $tokenFound = [bool](Get-ConfigValue -Object $probe -Name "TokenFound" -DefaultValue $false)
+        $accountState = [string](Get-ConfigValue -Object $probe -Name "AccountState" -DefaultValue "Unknown")
+        $accountMessage = [string](Get-ConfigValue -Object $probe -Name "AccountStateMessage" -DefaultValue "")
+        $clientRunning = [bool](Get-ConfigValue -Object $probe -Name "LeigodRunning" -DefaultValue $false)
+        $configuredCount = [int](Get-ConfigValue -Object $probe -Name "ConfiguredGameCount" -DefaultValue 0)
+        $detectedCount = [int](Get-ConfigValue -Object $probe -Name "DetectedGameCount" -DefaultValue 0)
+        $targetCount = [int](Get-ConfigValue -Object $probe -Name "TargetGameCount" -DefaultValue 0)
+        $runningCount = [int](Get-ConfigValue -Object $probe -Name "RunningGameCount" -DefaultValue 0)
+        $autoDetect = [bool](Get-ConfigValue -Object $probe -Name "AutoDetectionEnabled" -DefaultValue $false)
+
+        $DiagSummaryText.Text = ("监控: {0}；自动识别: {1}" -f $script:MonitorInstanceState, $(if ($autoDetect) { "启用" } else { "关闭" }))
+        $DiagTokenText.Text = $(if ($tokenFound) { "已找到（来自雷神客户端日志，不会写入本项目）" } else { "未找到，请先登录雷神客户端" })
+        $DiagAccountText.Text = $(if ([string]::IsNullOrWhiteSpace($accountMessage)) { $accountState } else { "$accountState（$accountMessage）" })
+        $DiagClientText.Text = $(if ($clientRunning) { "运行中" } else { "未运行" })
+        $DiagGameText.Text = ("手动 {0} 个 · 自动识别 {1} 个 · 目标合计 {2} 个 · 正在运行 {3} 个" -f $configuredCount, $detectedCount, $targetCount, $runningCount)
+
+        $advice = @()
+        if (-not $tokenFound) {
+            $advice += "· 没有找到登录凭据：先登录雷神客户端，再运行一次诊断。"
+        }
+        if (-not $clientRunning -and $autoDetect) {
+            $advice += "· 客户端未运行：自动识别依赖客户端日志，未打开客户端时不会自动暂停。"
+        }
+        if ($targetCount -eq 0) {
+            $advice += "· 没有任何目标游戏：打开自动识别，或在规则设置里补充进程名。"
+        }
+        if ($accountState -notin @("Active", "Paused")) {
+            $advice += "· 账号状态不是 Active/Paused：暂停请求会被拒绝，先确认客户端里已登录并正常计时。"
+        }
+        if ($advice.Count -eq 0) {
+            $advice += "· 检查通过：监控运行时会按规则在游戏退出后复核并暂停。"
+        }
+        if ($script:MonitorInstanceState -ne "Running") {
+            $advice += "· 后台监控当前未运行，任何规则都不会生效。"
+        }
+        $DiagAdviceText.Text = ($advice -join [Environment]::NewLine)
+    }
+
+    function Get-DiagReportText {
+        $lines = @(
+            "雷神自动暂停 排障报告",
+            ("时间: " + (Get-Date -Format "yyyy-MM-dd HH:mm:ss")),
+            ("监控: " + $script:MonitorInstanceState),
+            ("登录凭据: " + $DiagTokenText.Text),
+            ("账号时长: " + $DiagAccountText.Text),
+            ("雷神客户端: " + $DiagClientText.Text),
+            ("目标游戏: " + $DiagGameText.Text),
+            ("建议: " + ($DiagAdviceText.Text -replace "`r?`n", " "))
+        )
+        return ($lines -join [Environment]::NewLine)
+    }
     function Show-Panel {
-        param([Parameter(Mandatory = $true)][ValidateSet("Overview", "Settings", "Logs")][string]$Name)
+        param([Parameter(Mandatory = $true)][ValidateSet("Overview", "Settings", "Logs", "Diag")][string]$Name)
         $OverviewPanel.Visibility = $(if ($Name -eq "Overview") { "Visible" } else { "Collapsed" })
         $SettingsPanel.Visibility = $(if ($Name -eq "Settings") { "Visible" } else { "Collapsed" })
         $LogsPanel.Visibility = $(if ($Name -eq "Logs") { "Visible" } else { "Collapsed" })
+        $DiagPanel.Visibility = $(if ($Name -eq "Diag") { "Visible" } else { "Collapsed" })
 
         foreach ($entry in @(
             @{ Name = "Overview"; Host = $OverviewNavHost; Indicator = $OverviewIndicator; Button = $OverviewNavButton },
             @{ Name = "Settings"; Host = $SettingsNavHost; Indicator = $SettingsIndicator; Button = $SettingsNavButton },
-            @{ Name = "Logs"; Host = $LogsNavHost; Indicator = $LogsIndicator; Button = $LogsNavButton }
+            @{ Name = "Logs"; Host = $LogsNavHost; Indicator = $LogsIndicator; Button = $LogsNavButton },
+            @{ Name = "Diag"; Host = $DiagNavHost; Indicator = $DiagIndicator; Button = $DiagNavButton }
         )) {
             $selected = $entry.Name -eq $Name
             $entry.Host.Background = $(if ($selected) { Get-ResourceBrush -Name "SurfaceStrongBrush" } else { [System.Windows.Media.Brushes]::Transparent })
@@ -1015,6 +1089,21 @@ try {
     $OverviewNavButton.Add_Click({ Show-Panel -Name "Overview" })
     $SettingsNavButton.Add_Click({ Show-Panel -Name "Settings" })
     $LogsNavButton.Add_Click({ Show-Panel -Name "Logs" })
+    $DiagNavButton.Add_Click({ Show-Panel -Name "Diag" })
+    $DiagRunButton.Add_Click({
+        $script:NextProbeAt = [datetime]::MinValue
+        Start-StatusProbe -Force
+        Set-FooterMessage -Message "正在运行诊断..."
+    })
+    $DiagCopyButton.Add_Click({
+        try {
+            [System.Windows.Clipboard]::SetText((Get-DiagReportText))
+            Set-FooterMessage -Message "排障报告已复制。"
+        }
+        catch {
+            Set-FooterMessage -Message "复制失败，可手动选择文本复制。"
+        }
+    })
 
     $MonitorActionButton.Add_Click({
         if ($script:MonitorInstanceState -eq "Running") {
@@ -1120,6 +1209,8 @@ try {
                 Start-ControlAction -Kind "Restart"
             }
             else {
+                $SettingsHintText.Text = "已保存，待下次启动监控生效"
+                $SettingsHintText.Foreground = Get-ResourceBrush -Name "AmberBrush"
                 Set-FooterMessage -Message "设置已保存，将在下次启动监控时生效。"
             }
         }
@@ -1162,6 +1253,9 @@ try {
             $now = Get-Date
             if ($now -ge $script:NextLocalRefreshAt) {
                 Update-LocalStatus
+                if ($DiagPanel.Visibility -eq "Visible") {
+                    Update-DiagView
+                }
                 $script:NextLocalRefreshAt = $now.AddSeconds(2)
             }
             if ($now -ge $script:NextLogRefreshAt) {
