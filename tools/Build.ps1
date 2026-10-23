@@ -7,6 +7,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $sourcePath = Join-Path $projectRoot "src\Launcher.cs"
 $manifestPath = Join-Path $projectRoot "src\app.manifest"
+$iconPath = Join-Path $projectRoot "app\ui\app.ico"
 $outputPath = Join-Path $projectRoot "LeigodAutoPause.exe"
 $requiredRuntimePaths = @(
     (Join-Path $projectRoot "app\ConfigBootstrap.ps1"),
@@ -30,7 +31,7 @@ if ([string]::IsNullOrWhiteSpace($compiler)) {
     throw "找不到 .NET Framework C# 编译器 csc.exe。"
 }
 
-foreach ($requiredPath in @($sourcePath, $manifestPath) + $requiredRuntimePaths) {
+foreach ($requiredPath in @($sourcePath, $manifestPath, $iconPath) + $requiredRuntimePaths) {
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
         throw "缺少构建文件: $requiredPath"
     }
@@ -46,6 +47,7 @@ $compilerArguments = @(
     "/reference:System.dll",
     "/reference:System.Windows.Forms.dll",
     "/win32manifest:$manifestPath",
+    "/win32icon:$iconPath",
     "/out:$outputPath"
 )
 

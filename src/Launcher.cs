@@ -7,6 +7,7 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Leigod Auto Pause Launcher (Unofficial)")]
 [assembly: AssemblyDescription("Launches the unofficial local Leigod Auto Pause control panel")]
 [assembly: AssemblyCompany("Leigod Auto Pause contributors")]
+[assembly: AssemblyCopyright("MIT License - unofficial tool")]
 [assembly: AssemblyProduct("Leigod Auto Pause")]
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]

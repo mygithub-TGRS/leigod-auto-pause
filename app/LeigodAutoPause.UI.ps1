@@ -64,6 +64,15 @@ try {
         $reader.Close()
     }
 
+    # 窗口图标：任务栏、Alt-Tab、标题栏都取这个；缺失时静默降级，不影响启动。
+    $windowIconPath = Join-Path $PSScriptRoot "ui\app.ico"
+    if (Test-Path -LiteralPath $windowIconPath) {
+        try {
+            $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]::new($windowIconPath))
+        }
+        catch { }
+    }
+
     $controlNames = @(
         "HeaderStatusDot", "HeaderStatusText", "RefreshButton", "OpenLeigodButton",
         "SidebarStatusDot", "SidebarStatusText", "AutoStartToggle",

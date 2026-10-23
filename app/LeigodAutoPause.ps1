@@ -1857,8 +1857,8 @@ function Start-LeigodMonitor {
                         Remove-InactiveLeigodLaunchSessions -Tracker $launchTracker
                     }
                 }
-                elseif ($state -eq "GameStarting" -and -not $activity.LaunchPending) {
-                    Write-MonitorLog -Level "WARN" -Message "雷神启动等待已结束，但未确认目标游戏进程运行；将保留目标用于后续复核，本次不执行。"
+                elseif ($state -eq "GameStarting" -and (-not $activity.LaunchPending -or (-not $clientRunning -and -not $clientSeenThisRun))) {
+                    Write-MonitorLog -Level "WARN" -Message "雷神启动等待已结束（目标进程未出现或客户端已关闭）；将保留目标用于后续复核，本次不执行。"
                     $lastDecision = "SKIP_PENDING_WITHOUT_RUNNING"
                     $lastDecisionAt = Get-Date
                     $state = "Idle"
