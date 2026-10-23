@@ -1,0 +1,14 @@
+{
+  "auto_detect_launched_games": true,
+  "game_processes": [],
+  "poll_seconds": 2,
+  "status_poll_seconds": 20,
+  "startup_grace_seconds": 300,
+  "exit_grace_seconds": 120,
+  "pause_if_client_closes": true,
+  "pause_if_game_never_starts": false,
+  "pause_stale_session_on_start": false,
+  "notifications": true,
+  "leigod_executable": "",
+  "leigod_shortcut": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\雷神加速器\\雷神加速器.lnk"
+}

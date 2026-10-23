@@ -1,0 +1,45 @@
+# Local configuration and runtime state
+app/config.json
+app/config.json.*
+app/config.local.json
+app/.stop
+app/logs/*
+!app/logs/.gitkeep
+*.tmp
+*.log
+http-*.log
+*.dmp
+*.lnk
+
+# Credentials and local environment overrides
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.ppk
+*.pk8
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local screenshots and diagnostics
+screenshots/
+docs/*.local.png
+*.snapshot.png
+
+# Build output
+LeigodAutoPause.exe
+*.pdb
+bin/
+obj/
+
+# IDE and operating-system files
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+Desktop.ini
+Thumbs.db
