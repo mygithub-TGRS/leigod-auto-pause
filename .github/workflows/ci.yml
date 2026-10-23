@@ -18,3 +18,6 @@ jobs:
       - name: Run Windows PowerShell release tests
         shell: cmd
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tools\Test.ps1
+      - name: Verify upload safety
+        shell: cmd
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tools\Verify-Upload.ps1
