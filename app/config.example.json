@@ -9,6 +9,7 @@
   "pause_if_game_never_starts": false,
   "pause_stale_session_on_start": false,
   "notifications": true,
+  "log_retention_days": 30,
   "leigod_executable": "",
   "leigod_shortcut": "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\雷神加速器\\雷神加速器.lnk"
 }

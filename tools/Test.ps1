@@ -37,6 +37,19 @@ if ($parseErrors.Count -gt 0) {
     throw ("PowerShell 语法验证失败: " + (($parseErrors | ForEach-Object { $_.Message }) -join "; "))
 }
 
+# Windows PowerShell 5.1 依赖 UTF-8 BOM 才能正确读取脚本里的中文；缺 BOM 会让提示文案变成乱码，
+# 严重时还会连字符串引号一起吃掉导致语法错误。这里把它变成硬性检查，防止编辑器保存时丢 BOM。
+$missingBom = @()
+Get-ChildItem -LiteralPath (Join-Path $projectRoot "app"), (Join-Path $projectRoot "tools") -Filter "*.ps1" -File | ForEach-Object {
+    $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+    if (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) {
+        $missingBom += $_.Name
+    }
+}
+if ($missingBom.Count -gt 0) {
+    throw ("以下 PowerShell 脚本缺少 UTF-8 BOM: " + ($missingBom -join ", "))
+}
+
 Get-Content -LiteralPath $configExample -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null
 [xml](Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8) | Out-Null
 
@@ -160,6 +173,111 @@ finally {
     if ($resolvedTestRoot.StartsWith($resolvedTempRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
         (Test-Path -LiteralPath $resolvedTestRoot)) {
         Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
+    }
+}
+
+# 纯函数回归测试：监控脚本支持 dot-source 只加载函数（不启动监控）。
+$regressionRoot = Join-Path $env:TEMP ("LeigodRegression-" + [guid]::NewGuid().ToString("N"))
+[void](New-Item -ItemType Directory -Path $regressionRoot -Force)
+try {
+    & {
+        . $monitorScript
+
+        if ($null -eq (Get-Command -Name Get-GameActivity -ErrorAction SilentlyContinue)) {
+            throw "监控脚本未定义 Get-GameActivity，dot-source 守卫可能失效。"
+        }
+
+        # 1) 空进程名必须被跳过：传给 Get-Process 会抛参数绑定异常并终止整个监控。
+        $emptyResult = @(Get-RunningConfiguredGames -ProcessNames ([string[]]@("", "   ")))
+        if ($emptyResult.Count -ne 0) {
+            throw "空进程名未被安全跳过。"
+        }
+
+        # 2) 合并工具必须去空、去重、去首尾空格。
+        $merged = @(Merge-ProcessNameList -NameList @("GameA", "", $null, "GameA", " GameB "))
+        if ($merged.Count -ne 2 -or $merged -notcontains "GameA" -or $merged -notcontains "GameB") {
+            throw ("进程名合并结果不正确: [{0}]" -f ($merged -join "|"))
+        }
+
+        # 3) 目标进程列表不允许出现空字符串（曾经泄漏进 runtime-state.json）。
+        $tracker = [pscustomobject]@{
+            StartedAt         = Get-Date
+            LogDirectory      = $regressionRoot
+            FileOffsets       = @{}
+            FileCreationTicks = @{}
+            SeenEvents        = @{}
+            Sessions          = @{}
+        }
+        $tracker.Sessions["42"] = [pscustomobject]@{
+            GameId         = [long]42
+            ProcessNames   = [string[]]@()
+            LastEventAt    = Get-Date
+            PendingUntil   = (Get-Date).AddSeconds(60)
+            StopObservedAt = $null
+            Unresolved     = $true
+        }
+        $regressionConfig = [pscustomobject]@{
+            GameProcesses           = [string[]]@("GameA")
+            AutoDetectLaunchedGames = $false
+        }
+        $activity = Get-GameActivity -Config $regressionConfig -LogDirectory $regressionRoot -Tracker $tracker
+        foreach ($targetName in @($activity.TargetProcesses)) {
+            if ([string]::IsNullOrWhiteSpace([string]$targetName)) {
+                throw "目标进程列表仍包含空字符串。"
+            }
+        }
+        if (@($activity.TargetProcesses).Count -ne 1) {
+            throw ("目标进程数量不正确: {0}" -f @($activity.TargetProcesses).Count)
+        }
+
+        # 4) 日志保留策略只删过期文件。
+        $script:LogDirectory = $regressionRoot
+        $oldLog = Join-Path $regressionRoot "monitor-2020-01-01.log"
+        $newLog = Join-Path $regressionRoot "monitor-2999-01-01.log"
+        Set-Content -LiteralPath $oldLog -Value "old" -Encoding UTF8
+        Set-Content -LiteralPath $newLog -Value "new" -Encoding UTF8
+        (Get-Item -LiteralPath $oldLog).LastWriteTime = (Get-Date).AddDays(-60)
+        Remove-ExpiredMonitorLogs -RetentionDays 30
+        if (Test-Path -LiteralPath $oldLog) {
+            throw "过期日志未被清理。"
+        }
+        if (-not (Test-Path -LiteralPath $newLog)) {
+            throw "未过期日志被错误删除。"
+        }
+
+        # 5) 越界的 log_retention_days 必须被配置校验拒绝。
+        $badConfigPath = Join-Path $regressionRoot "bad-retention.json"
+        [ordered]@{
+            auto_detect_launched_games    = $true
+            game_processes                = @()
+            poll_seconds                  = 2
+            status_poll_seconds           = 20
+            startup_grace_seconds         = 300
+            exit_grace_seconds            = 120
+            pause_if_client_closes        = $true
+            pause_if_game_never_starts    = $false
+            pause_stale_session_on_start  = $false
+            notifications                 = $false
+            log_retention_days            = 99999
+            leigod_executable             = ""
+            leigod_shortcut               = ""
+        } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $badConfigPath -Encoding UTF8
+        $rejected = $false
+        try {
+            [void](Read-MonitorConfig -Path $badConfigPath)
+        }
+        catch {
+            $rejected = $true
+        }
+        if (-not $rejected) {
+            throw "越界的 log_retention_days 未被拒绝。"
+        }
+    }
+    Write-Output "REGRESSION_TESTS_OK"
+}
+finally {
+    if (Test-Path -LiteralPath $regressionRoot) {
+        Remove-Item -LiteralPath $regressionRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

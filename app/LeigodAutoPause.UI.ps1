@@ -106,6 +106,10 @@ try {
     $script:CloseAfterControl = $false
     $script:NextLocalRefreshAt = [datetime]::MinValue
     $script:NextLogRefreshAt = [datetime]::MinValue
+    $script:UiProcessNames = $null
+    $script:UiProcessNamesAt = [datetime]::MinValue
+    $script:AutoStartState = $null
+    $script:AutoStartCheckedAt = [datetime]::MinValue
 
     function Get-ResourceBrush {
         param([Parameter(Mandatory = $true)][string]$Name)
@@ -145,17 +149,31 @@ try {
         if ([string]::IsNullOrWhiteSpace($baseName)) {
             return $false
         }
-        $queryName = [System.Management.Automation.WildcardPattern]::Escape($baseName)
+        # 统一走一次进程表快照：原来每个进程名都调一次 Get-Process，界面每 2 秒刷新时很浪费。
+        $runningNames = Get-UiProcessNameList
+        return ($runningNames -contains $baseName)
+    }
+
+    function Get-UiProcessNameList {
+        $now = Get-Date
+        if ($null -ne $script:UiProcessNames -and
+            ($now - $script:UiProcessNamesAt).TotalSeconds -lt 1) {
+            return $script:UiProcessNames
+        }
+        $names = @()
         $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-        return @(Get-Process -Name $queryName -ErrorAction SilentlyContinue | Where-Object {
+        foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
             try {
-                $_.SessionId -eq $currentSessionId -and
-                    [string]::Equals($_.ProcessName, $baseName, [System.StringComparison]::OrdinalIgnoreCase)
+                if ($process.SessionId -eq $currentSessionId -and
+                    -not [string]::IsNullOrWhiteSpace([string]$process.ProcessName)) {
+                    $names += [string]$process.ProcessName
+                }
             }
-            catch {
-                $false
-            }
-        }).Count -gt 0
+            catch { }
+        }
+        $script:UiProcessNames = $names
+        $script:UiProcessNamesAt = $now
+        return $names
     }
 
     function Get-MonitorInstanceState {
@@ -390,6 +408,7 @@ try {
             pause_if_game_never_starts    = [bool]$NeverStartedToggle.IsChecked
             pause_stale_session_on_start  = [bool]$StaleSessionToggle.IsChecked
             notifications                 = [bool]$NotificationsToggle.IsChecked
+            log_retention_days            = [int](Get-ConfigValue -Object $script:Config -Name "log_retention_days" -DefaultValue 30)
             leigod_executable             = [string](Get-ConfigValue -Object $script:Config -Name "leigod_executable" -DefaultValue "")
             leigod_shortcut               = [string](Get-ConfigValue -Object $script:Config -Name "leigod_shortcut" -DefaultValue "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\雷神加速器\雷神加速器.lnk")
         }
@@ -487,6 +506,11 @@ try {
 
     function Start-StatusProbe {
         if (-not $script:StatusProbeEnabled) {
+            return
+        }
+        # 后台监控运行时，runtime-state.json 里已经带着 account_state，界面直接读即可；
+        # 再起一个 PowerShell 子进程探测（每次约 1 秒 CPU）是纯浪费。
+        if ($script:MonitorInstanceState -eq "Running") {
             return
         }
         if ($null -ne $script:ProbeProcess -or (Get-Date) -lt $script:NextProbeAt) {
@@ -687,9 +711,15 @@ try {
             }
         }
 
+        # 开机自启状态原来每 2 秒新建一次 WScript.Shell COM 对象并读快捷方式，缓存 10 秒即可。
+        if ($null -eq $script:AutoStartState -or
+            ((Get-Date) - $script:AutoStartCheckedAt).TotalSeconds -ge 10) {
+            $script:AutoStartState = Test-AutoStartEnabled
+            $script:AutoStartCheckedAt = Get-Date
+        }
         $script:SuppressAutoStartEvents = $true
         try {
-            $AutoStartToggle.IsChecked = Test-AutoStartEnabled
+            $AutoStartToggle.IsChecked = [bool]$script:AutoStartState
         }
         finally {
             $script:SuppressAutoStartEvents = $false
@@ -817,9 +847,12 @@ try {
         if ($script:SuppressAutoStartEvents) { return }
         try {
             Set-AutoStartEnabled -Enabled $true
+            $script:AutoStartState = $true
+            $script:AutoStartCheckedAt = Get-Date
             Set-FooterMessage -Message "已启用开机自启。"
         }
         catch {
+            $script:AutoStartState = $null
             [System.Windows.MessageBox]::Show($_.Exception.Message, "开机自启", "OK", "Error") | Out-Null
         }
     })
@@ -827,9 +860,12 @@ try {
         if ($script:SuppressAutoStartEvents) { return }
         try {
             Set-AutoStartEnabled -Enabled $false
+            $script:AutoStartState = $false
+            $script:AutoStartCheckedAt = Get-Date
             Set-FooterMessage -Message "已关闭开机自启；当前监控不受影响。"
         }
         catch {
+            $script:AutoStartState = $null
             [System.Windows.MessageBox]::Show($_.Exception.Message, "开机自启", "OK", "Error") | Out-Null
         }
     })

@@ -24,6 +24,13 @@ $script:RuntimeStatePath = Join-Path $script:LogDirectory "runtime-state.json"
 $script:StopMarker = Join-Path $PSScriptRoot ".stop"
 $script:MonitorMutexName = "Local\LeigodAutoPauseMonitor"
 $script:RuntimeStateMaxAgeSeconds = 20
+# 雷神接口的业务返回码：400006 = 登录凭据失效；400803 = 账号已处于暂停状态（视为幂等成功）。
+$script:TokenInvalidCode = 400006
+$script:PauseAlreadyPausedCode = 400803
+# 进程名快照缓存：一个轮询周期内多次判断进程状态时只枚举一次进程表。
+$script:ProcessSnapshotCache = $null
+$script:ProcessSnapshotAt = [datetime]::MinValue
+$script:ProcessSnapshotMaxAgeSeconds = 1
 
 . (Join-Path $PSScriptRoot "SecurityHelpers.ps1")
 
@@ -153,6 +160,7 @@ function Read-MonitorConfig {
         PauseIfGameNeverStarts    = Get-StrictBooleanProperty -Object $source -Name "pause_if_game_never_starts" -DefaultValue $false
         PauseStaleSessionOnStart  = Get-StrictBooleanProperty -Object $source -Name "pause_stale_session_on_start" -DefaultValue $false
         Notifications             = Get-StrictBooleanProperty -Object $source -Name "notifications" -DefaultValue $true
+        LogRetentionDays          = Get-StrictIntegerProperty -Object $source -Name "log_retention_days" -DefaultValue 30
         LeigodExecutable          = Get-StrictStringProperty -Object $source -Name "leigod_executable" -DefaultValue ""
         LeigodShortcut            = Get-StrictStringProperty -Object $source -Name "leigod_shortcut" -DefaultValue "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\雷神加速器\雷神加速器.lnk"
     }
@@ -168,6 +176,9 @@ function Read-MonitorConfig {
     }
     if ($config.ExitGraceSeconds -lt 10 -or $config.ExitGraceSeconds -gt 3600) {
         throw "exit_grace_seconds 必须在 10 到 3600 之间。"
+    }
+    if ($config.LogRetentionDays -lt 0 -or $config.LogRetentionDays -gt 3650) {
+        throw "log_retention_days 必须在 0 到 3650 之间（0 表示不自动清理）。"
     }
 
     return $config
@@ -622,12 +633,38 @@ function Get-AutomaticGameProcesses {
     }
     foreach ($session in @($Tracker.Sessions.Values)) {
         foreach ($name in @($session.ProcessNames)) {
-            if ($names -notcontains $name) {
+            if ([string]::IsNullOrWhiteSpace([string]$name)) {
+                continue
+            }
+            if ($names -notcontains [string]$name) {
                 $names += [string]$name
             }
         }
     }
     return [string[]]$names
+}
+
+function Merge-ProcessNameList {
+    <#
+    .SYNOPSIS
+        合并多个进程名来源，去空、去重，返回干净的进程名数组。
+    .DESCRIPTION
+        空集合经 PowerShell 管道会被展平成 $null，而“数组 + $null”会追加一个 null 元素，
+        再转成字符串就变成空串，最终让 Get-Process -Name "" 抛异常。所有拼接都必须走这里。
+    #>
+    param([AllowNull()][AllowEmptyCollection()][object]$NameList)
+
+    $merged = @()
+    foreach ($name in @($NameList)) {
+        $candidate = ([string]$name).Trim()
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        if ($merged -notcontains $candidate) {
+            $merged += $candidate
+        }
+    }
+    return [string[]]$merged
 }
 
 function Get-CurrentLeigodAccelerationGameId {
@@ -708,23 +745,17 @@ function Get-GameActivity {
                 $pending = $true
             }
             if ($null -ne $currentGameId -and [long]$session.GameId -eq [long]$currentGameId) {
-                $associatedTargets += @($session.ProcessNames)
+                $associatedTargets += @(Merge-ProcessNameList -NameList $session.ProcessNames)
             }
             if ([bool](Get-ObjectPropertyValue -Object $session -Name "Unresolved" -DefaultValue $false)) {
                 $unresolved = $true
             }
         }
     }
-    $associatedRunning = @(Get-RunningConfiguredGames -ProcessNames ([string[]]$associatedTargets))
+    $associatedRunning = @(Get-RunningConfiguredGames -ProcessNames (Merge-ProcessNameList -NameList $associatedTargets))
 
-    $targets = @()
-    foreach ($name in @($manualTargets + $automaticTargets)) {
-        if ($targets -notcontains $name) { $targets += [string]$name }
-    }
-    $running = @()
-    foreach ($name in @($manualRunning + $automaticRunning)) {
-        if ($running -notcontains $name) { $running += [string]$name }
-    }
+    $targets = @(Merge-ProcessNameList -NameList (@($manualTargets) + @($automaticTargets)))
+    $running = @(Merge-ProcessNameList -NameList (@($manualRunning) + @($automaticRunning)))
 
     return [pscustomobject]@{
         TargetProcesses       = [string[]]$targets
@@ -770,6 +801,31 @@ function ConvertTo-AccountState {
     return [pscustomobject]@{ State = "Unknown"; Code = $code; Message = "未知 pause_status_id" }
 }
 
+function Get-HttpFailureReason {
+    <# 把网络异常压缩成一行可诊断信息（异常类型 + 连接状态 + HTTP 状态码），不包含请求内容。 #>
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+
+    $reason = $ErrorRecord.Exception.GetType().Name
+    try {
+        $status = Get-ObjectPropertyValue -Object $ErrorRecord.Exception -Name "Status" -DefaultValue $null
+        if ($null -ne $status) {
+            $reason = "{0}/{1}" -f $reason, $status
+        }
+    }
+    catch { }
+    try {
+        $response = Get-ObjectPropertyValue -Object $ErrorRecord.Exception -Name "Response" -DefaultValue $null
+        if ($null -ne $response) {
+            $statusCode = Get-ObjectPropertyValue -Object $response -Name "StatusCode" -DefaultValue $null
+            if ($null -ne $statusCode) {
+                $reason = "{0}/HTTP {1}" -f $reason, [int]$statusCode
+            }
+        }
+    }
+    catch { }
+    return $reason
+}
+
 function Get-LeigodAccountState {
     param([Parameter(Mandatory = $true)][string]$Token)
 
@@ -783,7 +839,11 @@ function Get-LeigodAccountState {
         return ConvertTo-AccountState -Response $response
     }
     catch {
-        return [pscustomobject]@{ State = "Unknown"; Code = $null; Message = "状态请求失败" }
+        return [pscustomobject]@{
+            State   = "Unknown"
+            Code    = $null
+            Message = ("状态请求失败({0})" -f (Get-HttpFailureReason -ErrorRecord $_))
+        }
     }
 }
 
@@ -806,42 +866,84 @@ function Invoke-LeigodPause {
         $response = Invoke-RestMethod -Uri $script:PauseEndpoint -Method Post -Body $body -ContentType "application/json; charset=UTF-8" -TimeoutSec 8 -UseBasicParsing -MaximumRedirection 0
         $code = Get-ObjectPropertyValue -Object $response -Name "code" -DefaultValue $null
         $message = [string](Get-ObjectPropertyValue -Object $response -Name "msg" -DefaultValue "")
-        $success = $null -ne $code -and ([int]$code -eq 0 -or [int]$code -eq 400803)
+        $success = $null -ne $code -and ([int]$code -eq 0 -or [int]$code -eq $script:PauseAlreadyPausedCode)
         return [pscustomobject]@{ Success = $success; Code = $code; Message = $message }
     }
     catch {
-        return [pscustomobject]@{ Success = $false; Code = $null; Message = "暂停请求失败" }
+        return [pscustomobject]@{
+            Success = $false
+            Code    = $null
+            Message = ("暂停请求失败({0})" -f (Get-HttpFailureReason -ErrorRecord $_))
+        }
     }
 }
 
+function Get-RunningProcessNameSet {
+    <#
+    .SYNOPSIS
+        返回当前 Windows 登录会话内所有进程名的集合（大小写不敏感）。
+    .DESCRIPTION
+        默认复用 1 秒内的快照。一个轮询周期里会多次判断进程状态，逐个进程名调用
+        Get-Process 会把整张进程表重复枚举很多遍（实测 589 个进程时约 13.6 ms/名字），
+        改成每周期一次快照后开销降到一次枚举。
+    #>
+    param([switch]$Refresh)
+
+    $now = Get-Date
+    if (-not $Refresh -and
+        $null -ne $script:ProcessSnapshotCache -and
+        ($now - $script:ProcessSnapshotAt).TotalSeconds -lt $script:ProcessSnapshotMaxAgeSeconds) {
+        Write-Output -NoEnumerate $script:ProcessSnapshotCache
+        return
+    }
+
+    $nameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        try {
+            if ($process.SessionId -eq $currentSessionId -and
+                -not [string]::IsNullOrWhiteSpace([string]$process.ProcessName)) {
+                [void]$nameSet.Add([string]$process.ProcessName)
+            }
+        }
+        catch { }
+    }
+
+    $script:ProcessSnapshotCache = $nameSet
+    $script:ProcessSnapshotAt = $now
+    Write-Output -NoEnumerate $script:ProcessSnapshotCache
+}
+
 function Get-RunningConfiguredGames {
-    param([Parameter(Mandatory = $true)][AllowNull()][AllowEmptyCollection()][string[]]$ProcessNames)
+    param([AllowNull()][AllowEmptyCollection()][string[]]$ProcessNames)
 
     $running = @()
-    $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-    foreach ($name in @($ProcessNames)) {
-        $queryName = [System.Management.Automation.WildcardPattern]::Escape($name)
-        $exactMatches = @(Get-Process -Name $queryName -ErrorAction SilentlyContinue | Where-Object {
-            try {
-                $_.SessionId -eq $currentSessionId -and
-                    [string]::Equals($_.ProcessName, $name, [System.StringComparison]::OrdinalIgnoreCase)
-            }
-            catch {
-                $false
-            }
-        })
-        if ($exactMatches.Count -gt 0) {
-            $running += $name
+    if ($null -eq $ProcessNames) {
+        return [string[]]$running
+    }
+    # 注意：PowerShell 5.1 下 @($null) 是含一个 null 元素的数组，不能直接用 @($x).Count 判空。
+    $requested = @($ProcessNames)
+    if ($requested.Count -eq 0) {
+        return [string[]]$running
+    }
+
+    $nameSet = Get-RunningProcessNameSet
+    foreach ($name in $requested) {
+        # 空进程名会让 Get-Process 抛参数绑定异常并终止整个监控，这里必须先挡掉。
+        $candidate = ([string]$name).Trim()
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            continue
+        }
+        if ($nameSet.Contains($candidate) -and $running -notcontains $candidate) {
+            $running += $candidate
         }
     }
     return [string[]]$running
 }
 
 function Test-LeigodClientRunning {
-    $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-    return @(Get-Process -Name "leigod" -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.SessionId -eq $currentSessionId } catch { $false }
-    }).Count -gt 0
+    $nameSet = Get-RunningProcessNameSet
+    return $nameSet.Contains("leigod")
 }
 
 function Write-MonitorLog {
@@ -850,19 +952,52 @@ function Write-MonitorLog {
         [Parameter(Mandatory = $true)][string]$Message
     )
 
-    if (-not (Test-Path -LiteralPath $script:LogDirectory -PathType Container)) {
-        [void](New-Item -ItemType Directory -Path $script:LogDirectory -Force)
-    }
     $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
-    Add-Content -LiteralPath (Join-Path $script:LogDirectory ("monitor-{0}.log" -f (Get-Date -Format "yyyy-MM-dd"))) -Value $line -Encoding UTF8
+    # 写日志失败绝不能反过来杀死监控：权限、磁盘被占用、杀软扫描都会让这里抛异常。
+    try {
+        if (-not (Test-Path -LiteralPath $script:LogDirectory -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $script:LogDirectory -Force)
+        }
+        Add-Content -LiteralPath (Join-Path $script:LogDirectory ("monitor-{0}.log" -f (Get-Date -Format "yyyy-MM-dd"))) -Value $line -Encoding UTF8
+    }
+    catch { }
     Write-Host $line
 }
 
-function Get-MonitorRuntimeState {
-    if (-not (Test-Path -LiteralPath $script:RuntimeStatePath -PathType Leaf)) {
-        return $null
+function Remove-ExpiredMonitorLogs {
+    param([int]$RetentionDays)
+
+    if ($RetentionDays -le 0) {
+        return
     }
     try {
+        if (-not (Test-Path -LiteralPath $script:LogDirectory -PathType Container)) {
+            return
+        }
+        $threshold = (Get-Date).Date.AddDays(-1 * $RetentionDays)
+        $removed = 0
+        foreach ($file in @(Get-ChildItem -LiteralPath $script:LogDirectory -Filter "monitor-*.log" -File -ErrorAction SilentlyContinue)) {
+            if ($file.LastWriteTime -ge $threshold) {
+                continue
+            }
+            try {
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop
+                $removed++
+            }
+            catch { }
+        }
+        if ($removed -gt 0) {
+            Write-MonitorLog -Level "INFO" -Message ("已按保留策略清理 {0} 个过期日志文件（保留 {1} 天）。" -f $removed, $RetentionDays)
+        }
+    }
+    catch { }
+}
+
+function Get-MonitorRuntimeState {
+    try {
+        if (-not (Test-Path -LiteralPath $script:RuntimeStatePath -PathType Leaf)) {
+            return $null
+        }
         $state = Get-Content -LiteralPath $script:RuntimeStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
         $updatedAt = [datetime]::MinValue
         if (-not [datetime]::TryParse(
@@ -907,8 +1042,13 @@ function Write-MonitorRuntimeState {
         return
     }
 
-    if (-not (Test-Path -LiteralPath $script:LogDirectory -PathType Container)) {
-        [void](New-Item -ItemType Directory -Path $script:LogDirectory -Force)
+    try {
+        if (-not (Test-Path -LiteralPath $script:LogDirectory -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $script:LogDirectory -Force)
+        }
+    }
+    catch {
+        return
     }
     $runtime = [ordered]@{
         schema_version        = 1
@@ -1055,7 +1195,7 @@ function Invoke-PauseAfterFinalCheck {
         return "Completed"
     }
     if ($finalState.State -ne "Active") {
-        Write-MonitorLog -Level "WARN" -Message "暂停前复核无法确认账号正在计时，本次不执行。"
+        Write-MonitorLog -Level "WARN" -Message ("暂停前复核无法确认账号正在计时（{0}），本次不执行。" -f $finalState.Message)
         return "Retry"
     }
 
@@ -1111,7 +1251,7 @@ function Invoke-PauseAfterFinalCheck {
         return "Retry"
     }
 
-    Write-MonitorLog -Level "ERROR" -Message ("暂停失败，接口返回代码: {0}。" -f $result.Code)
+    Write-MonitorLog -Level "ERROR" -Message ("暂停失败，接口返回代码: {0}；{1}。" -f $result.Code, $result.Message)
     return "Retry"
 }
 
@@ -1341,6 +1481,31 @@ function Invoke-SelfTest {
     }
     catch { $failures += $_.Exception.Message }
 
+    # 回归：空进程名曾经通过 TargetProcesses 泄漏，并让 Get-Process -Name "" 抛异常终止监控。
+    try {
+        if (@(Get-RunningConfiguredGames -ProcessNames ([string[]]@("", "  "))).Count -ne 0) {
+            throw "空进程名未被安全跳过"
+        }
+        $mergeResult = @(Merge-ProcessNameList -NameList @("GameA", "", $null, "GameA", " GameB "))
+        if ($mergeResult.Count -ne 2 -or
+            $mergeResult -notcontains "GameA" -or
+            $mergeResult -notcontains "GameB") {
+            throw ("进程名合并未去空去重: [{0}]" -f ($mergeResult -join "|"))
+        }
+        $emptyTracker = [pscustomobject]@{ Sessions = @{} }
+        $emptyConfig = [pscustomobject]@{ GameProcesses = [string[]]@("GameA"); AutoDetectLaunchedGames = $false }
+        $emptyActivity = Get-GameActivity -Config $emptyConfig -LogDirectory $env:TEMP -Tracker $emptyTracker
+        foreach ($targetName in @($emptyActivity.TargetProcesses)) {
+            if ([string]::IsNullOrWhiteSpace([string]$targetName)) {
+                throw "目标进程列表仍包含空字符串"
+            }
+        }
+        if ($emptyActivity.TargetProcesses.Count -ne 1) {
+            throw ("目标进程列表数量不正确: {0}" -f $emptyActivity.TargetProcesses.Count)
+        }
+    }
+    catch { $failures += $_.Exception.Message }
+
     if ($failures.Count -gt 0) {
         throw ("自检失败: " + ($failures -join "; "))
     }
@@ -1395,6 +1560,11 @@ function Start-LeigodMonitor {
         $lastRuntimeSignature = ""
         $lastRuntimeWriteAt = [datetime]::MinValue
         $cycle = 0
+        $unknownStatusChecks = 0
+        $lastStatusMessage = ""
+        # 倒计时开始后，失败重试允许的最晚时间；超过后放弃本次暂停，避免把很久以前的会话在数小时后补暂停。
+        $pauseAttemptExpiresAt = $null
+        $lastLogPruneDate = [datetime]::MinValue
 
         $manualSummary = $(if ($Config.GameProcesses.Count -gt 0) { $Config.GameProcesses -join ", " } else { "无" })
         Write-MonitorLog -Level "INFO" -Message ("监控已启动{0}。自动识别: {1}；手动补充: {2}" -f $(if ($DryRunEnabled) { "（dry-run）" } else { "" }), $(if ($Config.AutoDetectLaunchedGames) { "启用" } else { "关闭" }), $manualSummary)
@@ -1405,10 +1575,20 @@ function Start-LeigodMonitor {
             }
         }
 
+        $logRetentionDays = [int](Get-ObjectPropertyValue -Object $Config -Name "LogRetentionDays" -DefaultValue 30)
+        Remove-ExpiredMonitorLogs -RetentionDays $logRetentionDays
+        $lastLogPruneDate = (Get-Date).Date
+
         while ($true) {
             if (Test-Path -LiteralPath $script:StopMarker) {
                 Write-MonitorLog -Level "INFO" -Message "收到停止标记，监控退出。"
                 break
+            }
+
+            # 跨天后重新执行一次日志保留清理（长期运行的监控不会重启，启动时清一次不够）。
+            if ($logRetentionDays -gt 0 -and (Get-Date).Date -ne $lastLogPruneDate) {
+                Remove-ExpiredMonitorLogs -RetentionDays $logRetentionDays
+                $lastLogPruneDate = (Get-Date).Date
             }
 
             $cycle++
@@ -1448,7 +1628,14 @@ function Start-LeigodMonitor {
                     $countdownToken = $null
                 }
             }
-            $activity = Get-GameActivity -Config $Config -LogDirectory $HttpLogDirectory -Tracker $launchTracker -RefreshTracker
+            try {
+                $activity = Get-GameActivity -Config $Config -LogDirectory $HttpLogDirectory -Tracker $launchTracker -RefreshTracker
+            }
+            catch {
+                Write-MonitorLog -Level "WARN" -Message ("本轮游戏状态检查失败，跳过本周期: {0}" -f $_.Exception.Message)
+                Start-Sleep -Seconds $Config.PollSeconds
+                continue
+            }
             $runningGames = @($activity.RunningGames)
             $gameRunning = $runningGames.Count -gt 0
 
@@ -1476,11 +1663,18 @@ function Start-LeigodMonitor {
                 $gameExitObservedAt = $now
             }
 
-            $statusDue = ($now - $lastStatusCheck).TotalSeconds -ge $Config.StatusPollSeconds
+            # 账号状态巡检：单次失败时用 3 秒间隔快速重试，避免把一次网络抖动放大成
+            # “Unknown → 等下个周期才恢复”的成对日志；连续失败才降级为 WARN。
+            $statusInterval = [int]$Config.StatusPollSeconds
+            if ($accountState -eq "Unknown" -and $unknownStatusChecks -lt 2) {
+                $statusInterval = [math]::Min($statusInterval, 3)
+            }
+            $statusDue = ($now - $lastStatusCheck).TotalSeconds -ge $statusInterval
             $needsStatus = $cycle -eq 1 -or $clientRunning -or $gameRunning -or $activity.LaunchPending -or $state -ne "Idle"
             $finalCheckReady = $null -ne $deadline -and $now -ge $deadline -and $accountState -eq "Active" -and $token
             if ($needsStatus -and $statusDue -and -not $finalCheckReady) {
                 $freshToken = Get-LatestAccountToken -HttpLogDirectory $HttpLogDirectory
+                $statusMessage = ""
                 if ($freshToken) {
                     if ($token -and
                         -not [string]::Equals($freshToken, $token, [System.StringComparison]::Ordinal)) {
@@ -1501,19 +1695,36 @@ function Start-LeigodMonitor {
                     $token = $freshToken
                     $statusResult = Get-LeigodAccountState -Token $token
                     $accountState = $statusResult.State
-                    if ($statusResult.Code -eq 400006) {
+                    $statusMessage = [string]$statusResult.Message
+                    if ($statusResult.Code -eq $script:TokenInvalidCode) {
                         $token = $null
                     }
                 }
                 else {
                     $accountState = "Unknown"
+                    $statusMessage = "未找到可用的账号凭据"
+                }
+                if ($accountState -eq "Unknown") {
+                    $unknownStatusChecks++
+                    $lastStatusMessage = $statusMessage
+                }
+                else {
+                    $unknownStatusChecks = 0
                 }
                 $lastStatusCheck = $now
 
                 if ($accountState -ne $lastLoggedAccountState) {
-                    $logLevel = $(if ($accountState -eq "Unknown") { "WARN" } else { "INFO" })
-                    Write-MonitorLog -Level $logLevel -Message ("账号状态更新: {0}。" -f $accountState)
-                    $lastLoggedAccountState = $accountState
+                    if ($accountState -eq "Unknown") {
+                        # 单次失败通常下一个 3 秒重试就恢复，不值得写日志；连续失败才提示。
+                        if ($unknownStatusChecks -ge 2) {
+                            Write-MonitorLog -Level "WARN" -Message ("账号状态无法确认（连续 {0} 次）: {1}。" -f $unknownStatusChecks, $lastStatusMessage)
+                            $lastLoggedAccountState = $accountState
+                        }
+                    }
+                    else {
+                        Write-MonitorLog -Level "INFO" -Message ("账号状态更新: {0}。" -f $accountState)
+                        $lastLoggedAccountState = $accountState
+                    }
                 }
             }
 
@@ -1570,6 +1781,7 @@ function Start-LeigodMonitor {
                         $next = Start-CountdownState -NewState "AfterGameExit" -Seconds $Config.ExitGraceSeconds -Reason "检测到游戏进程已退出" -Config $Config
                         $state = $next.State
                         $deadline = $next.Deadline
+                        $pauseAttemptExpiresAt = $next.Deadline.AddSeconds($eventRetentionSeconds)
                         $countdownToken = $token
                         $pendingClientExit = $false
                         $clientExitObservedAt = $null
@@ -1603,6 +1815,7 @@ function Start-LeigodMonitor {
                         $next = Start-CountdownState -NewState "AfterClientExit" -Seconds $Config.ExitGraceSeconds -Reason "检测到雷神客户端已关闭" -Config $Config
                         $state = $next.State
                         $deadline = $next.Deadline
+                        $pauseAttemptExpiresAt = $next.Deadline.AddSeconds($eventRetentionSeconds)
                         $countdownToken = $token
                         $pendingClientExit = $false
                         $clientExitObservedAt = $null
@@ -1613,13 +1826,30 @@ function Start-LeigodMonitor {
                     $next = Start-CountdownState -NewState "WaitingForGame" -Seconds $Config.StartupGraceSeconds -Reason "账号正在计时，但尚未检测到自动或手动目标游戏" -Config $Config
                     $state = $next.State
                     $deadline = $next.Deadline
+                    $pauseAttemptExpiresAt = $next.Deadline.AddSeconds($eventRetentionSeconds)
                     $countdownToken = $token
                 }
                 elseif ($state -eq "Idle" -and -not $clientRunning -and $Config.PauseStaleSessionOnStart -and -not $clientSeenThisRun -and -not $activity.UnresolvedLaunch) {
                     $next = Start-CountdownState -NewState "StaleSession" -Seconds $Config.StartupGraceSeconds -Reason "检测到上次遗留的计时状态" -Config $Config
                     $state = $next.State
                     $deadline = $next.Deadline
+                    $pauseAttemptExpiresAt = $next.Deadline.AddSeconds($eventRetentionSeconds)
                     $countdownToken = $token
+                }
+
+                # 重试窗口：倒计时到点后若因为凭据或接口问题一直无法完成，最多再等一个
+                # eventRetentionSeconds 就放弃，避免几小时后对一次早已过期的会话补做暂停。
+                if ($null -ne $deadline -and $null -ne $pauseAttemptExpiresAt -and $now -gt $pauseAttemptExpiresAt) {
+                    Write-MonitorLog -Level "WARN" -Message "自动暂停重试已超过安全等待窗口，放弃本次暂停。"
+                    $state = "Idle"
+                    $deadline = $null
+                    $countdownToken = $null
+                    $pauseAttemptExpiresAt = $null
+                    $gameSessionConfirmedActive = $false
+                    $clientSessionConfirmedActive = $false
+                    $pendingClientExit = $false
+                    $gameExitObservedAt = $null
+                    $clientExitObservedAt = $null
                 }
 
                 if ($null -ne $deadline -and $now -ge $deadline) {
@@ -1708,8 +1938,9 @@ function Start-LeigodMonitor {
                 Write-MonitorLog -Level "INFO" -Message ("当前状态: {0}，剩余 {1}。" -f $state, (Format-Countdown -Deadline $deadline))
             }
 
-            $runtimeActivity = Get-GameActivity -Config $Config -LogDirectory $HttpLogDirectory -Tracker $launchTracker
-            Write-MonitorRuntimeState -State $state -AccountState $accountState -Activity $runtimeActivity -AutoDetectionEnabled $Config.AutoDetectLaunchedGames -Force $false -LastSignature ([ref]$lastRuntimeSignature) -LastWriteAt ([ref]$lastRuntimeWriteAt)
+            # 直接复用本周期开头的 $activity；这里原来又完整跑了一遍 Get-GameActivity
+            # （进程枚举 + 加速状态文件读取），属于每个周期都重复一次的劳动。
+            Write-MonitorRuntimeState -State $state -AccountState $accountState -Activity $activity -AutoDetectionEnabled $Config.AutoDetectLaunchedGames -Force $false -LastSignature ([ref]$lastRuntimeSignature) -LastWriteAt ([ref]$lastRuntimeWriteAt)
             $lastClientRunning = $clientRunning
             $lastGameRunning = $gameRunning
             if ($CycleLimit -gt 0 -and $cycle -ge $CycleLimit) {
@@ -1726,6 +1957,12 @@ function Start-LeigodMonitor {
         }
         $mutex.Dispose()
     }
+}
+
+# 允许测试脚本用 “. .\LeigodAutoPause.ps1” 只加载函数而不启动监控，
+# 这样 tools\Test.ps1 才能直接对纯函数做回归测试。
+if ($MyInvocation.InvocationName -eq '.') {
+    return
 }
 
 if ($SelfTest) {

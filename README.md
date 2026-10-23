@@ -28,7 +28,7 @@
 
 - 雷神客户端日志本身已在磁盘保存 Token；本工具不会把提取出的 Token 再写入自己的配置、日志或诊断输出；
 - Token 在当前 PowerShell 进程内处理，并作为 HTTPS 请求体发送到上述固定主机；系统代理、操作系统和第三方客户端自身的行为不由本项目控制；
-- 本项目日志位于 `app\logs`，以本地明文记录时间、游戏进程、客户端/账号状态、倒计时、接口结果代码和错误类别；当前版本不会自动清理日志；
+- 本项目日志位于 `app\logs`，以本地明文记录时间、游戏进程、客户端/账号状态、倒计时、接口结果代码和错误类别；默认只保留最近 30 天（`log_retention_days`，设为 `0` 关闭自动清理）；
 - `app\config.json` 可能包含游戏名称和本机安装路径；
 - 维护者不会自动收到配置、Token 或日志。不要在 Issue、Discussion、Pull Request、截图中公开这些内容。
 
@@ -70,6 +70,7 @@ powershell.exe -STA -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\app\Leigo
 | `pause_if_game_never_starts` | `false` | 客户端计时但未检测到游戏时是否触发暂停 |
 | `pause_stale_session_on_start` | `false` | 是否处理启动监控前遗留的计时状态 |
 | `notifications` | `true` | 是否显示 Windows 通知 |
+| `log_retention_days` | `30` | `monitor-*.log` 的保留天数，范围 0-3650；`0` 表示不自动清理 |
 | `leigod_executable` | 空 | 可选；只接受本地磁盘上的 `leigod.exe` |
 | `leigod_shortcut` | 官方快捷方式常见路径 | 只接受本地 `.lnk`，且目标必须是 `leigod.exe` |
 
@@ -178,7 +179,7 @@ LICENSE                      MIT License
 - 进程判断限于当前 Windows 登录会话，并按雷神事件或手动补充中的精确进程名识别；同一会话中的同名进程会影响判断；
 - 本工具不能保证暂停请求成功，也不能避免第三方依据其协议采取账号措施；
 - 首次启动监控前已经结束的游戏会话无法追溯；
-- 本地日志当前没有自动轮换或删除策略；
+- 本地日志按 `log_retention_days` 自动清理，但当前不做大小上限或压缩；
 - 多份安装使用同名本地互斥锁，不建议同时运行。
 
 ## 许可证与声明
