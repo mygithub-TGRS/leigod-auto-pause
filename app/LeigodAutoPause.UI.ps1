@@ -80,7 +80,9 @@ try {
         "StartupGraceInput", "StartupGraceMinusButton", "StartupGracePlusButton",
         "AutoDetectGamesToggle", "PauseOnClientCloseToggle", "NotificationsToggle", "NeverStartedToggle", "StaleSessionToggle",
         "SettingsHintText", "SaveSettingsButton", "OpenLogFolderButton", "RefreshLogButton",
-        "LogTextBox", "FooterMessageText"
+        "LogTextBox", "FooterMessageText",
+        "VerdictBar", "VerdictIcon", "VerdictText", "FreshnessText", "CountdownText", "LastDecisionText",
+        "LogSourceText", "LogMatchCountText", "LogSearchInput", "LogLevelCombo", "LogCopyButton"
     )
     foreach ($controlName in $controlNames) {
         $control = $window.FindName($controlName)
@@ -88,6 +90,25 @@ try {
             throw "界面控件缺失: $controlName"
         }
         Set-Variable -Name $controlName -Value $control -Scope Script
+    }
+
+    # 资源 key 同样是脚本侧的硬契约（Get-ResourceBrush 用），缺失时要在启动就报错，
+    # 而不是等用户点到某个状态才发现界面崩了。
+    $requiredResourceKeys = @(
+        "GreenBrush", "AmberBrush", "RedBrush", "MutedBrush", "WeakBrush",
+        "TextBrush", "SurfaceStrongBrush", "PrimaryButtonStyle", "DangerButtonStyle"
+    )
+    $missingResourceKeys = @()
+    foreach ($resourceKey in $requiredResourceKeys) {
+        try {
+            [void]$window.FindResource($resourceKey)
+        }
+        catch {
+            $missingResourceKeys += $resourceKey
+        }
+    }
+    if ($missingResourceKeys.Count -gt 0) {
+        throw ("界面资源缺失: " + ($missingResourceKeys -join ", "))
     }
 
     $script:Config = $null
@@ -315,9 +336,10 @@ try {
         param([switch]$SkipValidation)
 
         if (-not $SkipValidation) {
-            & $script:PowerShellPath -NoProfile -ExecutionPolicy Bypass -File $script:MonitorScript -ConfigPath $script:ConfigPath -ValidateConfig | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "配置未通过监控器验证。"
+            $validation = Invoke-ConfigValidation -Path $script:ConfigPath
+            if ($validation.ExitCode -ne 0) {
+                $validationDetail = $(if ([string]::IsNullOrWhiteSpace($validation.Error)) { "" } else { "：" + $validation.Error })
+                throw ("配置未通过监控器验证{0}" -f $validationDetail)
             }
         }
 
@@ -397,28 +419,30 @@ try {
             throw "关闭自动识别时，至少需要一个手动补充进程。"
         }
 
-        $configObject = [ordered]@{
-            auto_detect_launched_games     = [bool]$AutoDetectGamesToggle.IsChecked
-            game_processes                = [string[]]@($script:GameNames)
-            poll_seconds                  = [int](Get-ConfigValue -Object $script:Config -Name "poll_seconds" -DefaultValue 2)
-            status_poll_seconds           = [int](Get-ConfigValue -Object $script:Config -Name "status_poll_seconds" -DefaultValue 20)
-            startup_grace_seconds         = $startupGrace
-            exit_grace_seconds            = $exitGrace
-            pause_if_client_closes        = [bool]$PauseOnClientCloseToggle.IsChecked
-            pause_if_game_never_starts    = [bool]$NeverStartedToggle.IsChecked
-            pause_stale_session_on_start  = [bool]$StaleSessionToggle.IsChecked
-            notifications                 = [bool]$NotificationsToggle.IsChecked
-            log_retention_days            = [int](Get-ConfigValue -Object $script:Config -Name "log_retention_days" -DefaultValue 30)
-            leigod_executable             = [string](Get-ConfigValue -Object $script:Config -Name "leigod_executable" -DefaultValue "")
-            leigod_shortcut               = [string](Get-ConfigValue -Object $script:Config -Name "leigod_shortcut" -DefaultValue "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\雷神加速器\雷神加速器.lnk")
+        # 以现有配置为底，只覆写界面负责的键。否则用户在 config.json 里手写的键
+        # 或未来新增的键，会在界面上点一次“保存”后被静默删掉。
+        $configObject = [ordered]@{}
+        if ($null -ne $script:Config) {
+            foreach ($property in $script:Config.PSObject.Properties) {
+                $configObject[$property.Name] = $property.Value
+            }
         }
+        $configObject["auto_detect_launched_games"]    = [bool]$AutoDetectGamesToggle.IsChecked
+        $configObject["game_processes"]                = [string[]]@($script:GameNames)
+        $configObject["startup_grace_seconds"]         = $startupGrace
+        $configObject["exit_grace_seconds"]            = $exitGrace
+        $configObject["pause_if_client_closes"]        = [bool]$PauseOnClientCloseToggle.IsChecked
+        $configObject["pause_if_game_never_starts"]    = [bool]$NeverStartedToggle.IsChecked
+        $configObject["pause_stale_session_on_start"]  = [bool]$StaleSessionToggle.IsChecked
+        $configObject["notifications"]                 = [bool]$NotificationsToggle.IsChecked
 
         $temporaryPath = "$($script:ConfigPath).ui.tmp"
         try {
             $configObject | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
-            & $script:PowerShellPath -NoProfile -ExecutionPolicy Bypass -File $script:MonitorScript -ConfigPath $temporaryPath -ValidateConfig | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "新配置未通过监控器验证。"
+            $validation = Invoke-ConfigValidation -Path $temporaryPath
+            if ($validation.ExitCode -ne 0) {
+                $validationDetail = $(if ([string]::IsNullOrWhiteSpace($validation.Error)) { "" } else { "：" + $validation.Error })
+                throw ("新配置未通过监控器验证{0}" -f $validationDetail)
             }
             Move-Item -LiteralPath $temporaryPath -Destination $script:ConfigPath -Force
         }
@@ -436,6 +460,39 @@ try {
     function Quote-ProcessArgument {
         param([Parameter(Mandatory = $true)][string]$Value)
         return '"' + $Value.Replace('"', '\"') + '"'
+    }
+
+    function Invoke-ConfigValidation {
+        <# 调用监控器做配置校验，并把 stderr 原文带回来——否则用户只能看到“未通过验证”这种没有信息量的结论。 #>
+        param([Parameter(Mandatory = $true)][string]$Path)
+
+        $stamp = [guid]::NewGuid().ToString("N")
+        $stdoutPath = Join-Path $env:TEMP ("leigod-validate-out-$stamp.txt")
+        $stderrPath = Join-Path $env:TEMP ("leigod-validate-err-$stamp.txt")
+        try {
+            $process = Start-Process -FilePath $script:PowerShellPath -ArgumentList @(
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", (Quote-ProcessArgument -Value $script:MonitorScript),
+                "-ConfigPath", (Quote-ProcessArgument -Value $Path),
+                "-ValidateConfig"
+            ) -NoNewWindow -Wait -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+            $errorText = ""
+            if (Test-Path -LiteralPath $stderrPath) {
+                # 空文件时 Get-Content -Raw 会返回 $null，直接 .Trim() 会炸，所以先判空再收敛成字符串。
+                $rawError = Get-Content -LiteralPath $stderrPath -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+                if ($null -ne $rawError) {
+                    $errorText = ([string]$rawError).Trim()
+                }
+            }
+            return [pscustomobject]@{
+                ExitCode = $process.ExitCode
+                Error    = $errorText
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+        }
     }
 
     function Start-ControlAction {
@@ -492,7 +549,20 @@ try {
             Set-FooterMessage -Message $message
         }
         else {
-            $detail = $(if ($errorText) { ($errorText -split "`r?`n")[-1] } elseif ($output) { ($output -split "`r?`n")[-1] } else { "未知错误" })
+            # 只取最后一行会把真正的原因吞掉（例如“配置验证失败，未启动监控。”盖住了
+            # “game_processes 必须使用不含路径或通配符的完整进程名。”），所以保留最后 3 行。
+            $detailLines = @(
+                foreach ($source in @($errorText, $output)) {
+                    if ([string]::IsNullOrWhiteSpace($source)) { continue }
+                    foreach ($line in ($source -split "`r?`n")) {
+                        if (-not [string]::IsNullOrWhiteSpace($line)) { $line.Trim() }
+                    }
+                }
+            ) | Select-Object -Last 3
+            $detail = $(if (@($detailLines).Count -gt 0) { (@($detailLines) -join " / ") } else { "未知错误" })
+            if ($detail -match 'MONITOR_ALREADY_RUNNING') {
+                $detail = "后台监控已在运行。"
+            }
             Set-FooterMessage -Message ("控制操作失败: {0}" -f $detail)
             [System.Windows.MessageBox]::Show($detail, "雷神自动暂停（非官方）", "OK", "Error") | Out-Null
         }
@@ -509,9 +579,12 @@ try {
             return
         }
         # 后台监控运行时，runtime-state.json 里已经带着 account_state，界面直接读即可；
-        # 再起一个 PowerShell 子进程探测（每次约 1 秒 CPU）是纯浪费。
+        # 但状态文件过期（监控卡住或刚重启）时必须自己探测兜底，否则界面会一直显示旧值。
         if ($script:MonitorInstanceState -eq "Running") {
-            return
+            $liveState = Get-CurrentRuntimeState
+            if ($null -ne $liveState) {
+                return
+            }
         }
         if ($null -ne $script:ProbeProcess -or (Get-Date) -lt $script:NextProbeAt) {
             return
@@ -565,33 +638,86 @@ try {
         Update-LocalStatus
     }
 
-    function Get-LatestLogLines {
+    function Get-LatestLogSnapshot {
         param([ValidateRange(1, 500)][int]$Count = 200)
+
         if (-not (Test-Path -LiteralPath $script:LogDirectory -PathType Container)) {
-            return [string[]]@()
+            return [pscustomobject]@{ FileName = ""; Lines = [string[]]@() }
         }
         $file = Get-ChildItem -LiteralPath $script:LogDirectory -Filter "monitor-*.log" -File -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($null -eq $file) {
-            return [string[]]@()
+            return [pscustomobject]@{ FileName = ""; Lines = [string[]]@() }
         }
-        return [string[]]@(Get-Content -LiteralPath $file.FullName -Tail $Count -Encoding UTF8 -ErrorAction SilentlyContinue | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $lines = @(Get-Content -LiteralPath $file.FullName -Tail $Count -Encoding UTF8 -ErrorAction SilentlyContinue |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        return [pscustomobject]@{ FileName = $file.Name; Lines = [string[]]$lines }
+    }
+
+    function Test-LogLineMatchesFilter {
+        param(
+            [AllowEmptyString()][string]$Line,
+            [AllowEmptyString()][string]$Keyword,
+            [AllowEmptyString()][string]$LevelFilter
+        )
+
+        $level = "INFO"
+        if ($Line -match '\[(WARN|ERROR)\]') {
+            $level = $Matches[1]
+        }
+        switch ($LevelFilter) {
+            "仅提醒" { if ($level -ne "WARN") { return $false } }
+            "仅错误" { if ($level -ne "ERROR") { return $false } }
+            "仅决策" { if ($Line -notmatch '\[DECISION:') { return $false } }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Keyword) -and
+            $Line.IndexOf($Keyword, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            return $false
+        }
+        return $true
     }
 
     function Update-LogView {
-        $lines = @(Get-LatestLogLines -Count 200)
-        if ($lines.Count -eq 0) {
-            $LogTextBox.Text = "暂无运行日志。"
+        $snapshot = Get-LatestLogSnapshot -Count 200
+        $LogSourceText.Text = $(if ($snapshot.FileName) { "来源: " + $snapshot.FileName } else { "暂无日志文件" })
+
+        $keyword = [string]$LogSearchInput.Text
+        $levelFilter = ""
+        if ($null -ne $LogLevelCombo.SelectedItem -and $null -ne $LogLevelCombo.SelectedItem.Content) {
+            $levelFilter = [string]$LogLevelCombo.SelectedItem.Content
+        }
+
+        $filtered = @($snapshot.Lines | Where-Object {
+                Test-LogLineMatchesFilter -Line $_ -Keyword $keyword -LevelFilter $levelFilter
+            })
+        $LogMatchCountText.Text = $(if ($filtered.Count -ne $snapshot.Lines.Count) {
+                "命中 {0} / {1} 行" -f $filtered.Count, $snapshot.Lines.Count
+            }
+            else { "" })
+
+        if ($filtered.Count -eq 0) {
+            if ($LogTextBox.Text -ne "暂无匹配的运行日志。") {
+                $LogTextBox.Text = "暂无匹配的运行日志。"
+            }
             $ActivityText.Text = "暂无活动记录"
             $LastEventText.Text = "暂无活动记录"
             return
         }
-        $LogTextBox.Text = $lines -join [Environment]::NewLine
-        $LogTextBox.ScrollToEnd()
-        $recent = @($lines | Select-Object -Last 4)
+
+        # 只有内容真的变了才重写 Text：无条件赋值会每 5 秒清掉滚动位置和选区，排障时没法看。
+        $text = $filtered -join [Environment]::NewLine
+        if ($LogTextBox.Text -ne $text) {
+            $wasAtBottom = (($LogTextBox.ExtentHeight - $LogTextBox.VerticalOffset - $LogTextBox.ViewportHeight) -lt 2)
+            $LogTextBox.Text = $text
+            if ($wasAtBottom) {
+                $LogTextBox.ScrollToEnd()
+            }
+        }
+
+        $recent = @($filtered | Select-Object -Last 4)
         $ActivityText.Text = $recent -join [Environment]::NewLine
-        $LastEventText.Text = [string]$lines[-1]
+        $LastEventText.Text = [string]$filtered[-1]
     }
 
     function Update-LocalStatus {
@@ -711,6 +837,89 @@ try {
             }
         }
 
+        # ---- 结论条：一句话回答“我现在安全吗” ----
+        $sessionConfirmed = $false
+        $pauseDeadlineText = ""
+        $lastDecisionCode = ""
+        $lastDecisionTime = ""
+        $runtimeAccountMessage = ""
+        if ($null -ne $runtimeState) {
+            $sessionConfirmed = [bool](Get-ConfigValue -Object $runtimeState -Name "session_confirmed" -DefaultValue (Get-ConfigValue -Object $runtimeState -Name "association_confirmed" -DefaultValue $false))
+            $pauseDeadlineText = [string](Get-ConfigValue -Object $runtimeState -Name "pause_deadline_at" -DefaultValue "")
+            $lastDecisionCode = [string](Get-ConfigValue -Object $runtimeState -Name "last_decision" -DefaultValue "")
+            $lastDecisionTime = [string](Get-ConfigValue -Object $runtimeState -Name "last_decision_at" -DefaultValue "")
+            $runtimeAccountMessage = [string](Get-ConfigValue -Object $runtimeState -Name "account_message" -DefaultValue "")
+        }
+
+        $verdictLabel = ""
+        $verdictBrushName = "MutedBrush"
+        $verdictGlyph = [char]0xE946
+        if ($script:MonitorInstanceState -ne "Running") {
+            $verdictLabel = "后台监控未运行，不会自动暂停"
+            $verdictBrushName = "WeakBrush"
+            $verdictGlyph = [char]0xEA39
+        }
+        elseif ($runtimeAccountState -eq "Paused") {
+            $verdictLabel = "已暂停，安全"
+            $verdictBrushName = "GreenBrush"
+            $verdictGlyph = [char]0xE73E
+        }
+        elseif ($gameRunning -and $runtimeAccountState -eq "Active" -and $sessionConfirmed) {
+            $verdictLabel = "计时中，游戏退出后将自动暂停"
+            $verdictBrushName = "AmberBrush"
+            $verdictGlyph = [char]0xE7BA
+        }
+        elseif ($runtimeAccountState -eq "Active") {
+            $verdictLabel = "账号在计时，但本次会话尚未确认；退出后不会自动暂停"
+            $verdictBrushName = "AmberBrush"
+            $verdictGlyph = [char]0xE7BA
+        }
+        else {
+            $verdictLabel = "账号状态无法确认"
+            $verdictBrushName = "RedBrush"
+            $verdictGlyph = [char]0xEA39
+        }
+        $VerdictIcon.Text = [string]$verdictGlyph
+        $VerdictText.Text = $verdictLabel
+        $VerdictText.Foreground = Get-ResourceBrush -Name $verdictBrushName
+        $LastDecisionText.Text = $(if ($lastDecisionCode) { "最近结论: " + $lastDecisionCode } else { "" })
+
+        # 数据新鲜度：监控卡住时界面不能假装一切正常
+        $freshnessLabel = ""
+        if ($null -ne $runtimeState) {
+            $updatedAtValue = [datetime]::MinValue
+            if ([datetime]::TryParse(
+                    [string](Get-ConfigValue -Object $runtimeState -Name "updated_at" -DefaultValue ""),
+                    [System.Globalization.CultureInfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::RoundtripKind,
+                    [ref]$updatedAtValue)) {
+                $ageSeconds = [int][math]::Max(0, ((Get-Date) - $updatedAtValue.ToLocalTime()).TotalSeconds)
+                $freshnessLabel = "状态更新于 $ageSeconds 秒前"
+            }
+        }
+        $FreshnessText.Text = $freshnessLabel
+
+        # 倒计时只在四个倒计时状态出现
+        $CountdownText.Visibility = "Collapsed"
+        if (-not [string]::IsNullOrWhiteSpace($pauseDeadlineText)) {
+            $deadlineValue = [datetime]::MinValue
+            if ([datetime]::TryParse(
+                    $pauseDeadlineText,
+                    [System.Globalization.CultureInfo]::InvariantCulture,
+                    [System.Globalization.DateTimeStyles]::RoundtripKind,
+                    [ref]$deadlineValue)) {
+                $remainingSeconds = [int][math]::Ceiling(($deadlineValue.ToLocalTime() - (Get-Date)).TotalSeconds)
+                if ($remainingSeconds -gt 0) {
+                    $CountdownText.Text = ("剩余 {0:mm\:ss}" -f [timespan]::FromSeconds($remainingSeconds))
+                    $CountdownText.Visibility = "Visible"
+                }
+            }
+        }
+
+        # 账号状态无法确认时，直接给出原因（凭据失效 / HTTP 超时），而不是只说“无法确认”
+        if ($runtimeAccountState -eq "Unknown" -and -not [string]::IsNullOrWhiteSpace($runtimeAccountMessage)) {
+            $AccountStatusText.Text = "无法确认：" + $runtimeAccountMessage
+        }
         # 开机自启状态原来每 2 秒新建一次 WScript.Shell COM 对象并读快捷方式，缓存 10 秒即可。
         if ($null -eq $script:AutoStartState -or
             ((Get-Date) - $script:AutoStartCheckedAt).TotalSeconds -ge 10) {
@@ -891,10 +1100,11 @@ try {
         Update-RuleSummary
     })
 
-    $ExitGraceMinusButton.Add_Click({ Adjust-NumberInput -TextBox $ExitGraceInput -Delta -30 -Minimum 10 -Maximum 3600 })
-    $ExitGracePlusButton.Add_Click({ Adjust-NumberInput -TextBox $ExitGraceInput -Delta 30 -Minimum 10 -Maximum 3600 })
-    $StartupGraceMinusButton.Add_Click({ Adjust-NumberInput -TextBox $StartupGraceInput -Delta -30 -Minimum 10 -Maximum 7200 })
-    $StartupGracePlusButton.Add_Click({ Adjust-NumberInput -TextBox $StartupGraceInput -Delta 30 -Minimum 10 -Maximum 7200 })
+    # 步长必须让默认值可达：min=10、步长 30 时 120/300 都永远点不到。
+    $ExitGraceMinusButton.Add_Click({ Adjust-NumberInput -TextBox $ExitGraceInput -Delta -10 -Minimum 10 -Maximum 3600 })
+    $ExitGracePlusButton.Add_Click({ Adjust-NumberInput -TextBox $ExitGraceInput -Delta 10 -Minimum 10 -Maximum 3600 })
+    $StartupGraceMinusButton.Add_Click({ Adjust-NumberInput -TextBox $StartupGraceInput -Delta -10 -Minimum 10 -Maximum 7200 })
+    $StartupGracePlusButton.Add_Click({ Adjust-NumberInput -TextBox $StartupGraceInput -Delta 10 -Minimum 10 -Maximum 7200 })
     $ExitGraceInput.Add_TextChanged({ Set-SettingsDirty; Update-RuleSummary })
     $StartupGraceInput.Add_TextChanged({ Set-SettingsDirty })
     foreach ($toggle in @($AutoDetectGamesToggle, $PauseOnClientCloseToggle, $NotificationsToggle, $NeverStartedToggle, $StaleSessionToggle)) {
@@ -919,6 +1129,17 @@ try {
     })
 
     $RefreshLogButton.Add_Click({ Update-LogView; Set-FooterMessage -Message "日志已刷新。" })
+    $LogSearchInput.Add_TextChanged({ Update-LogView })
+    $LogLevelCombo.Add_SelectionChanged({ Update-LogView })
+    $LogCopyButton.Add_Click({
+        try {
+            [System.Windows.Clipboard]::SetText([string]$LogTextBox.Text)
+            Set-FooterMessage -Message "已复制当前日志视图。"
+        }
+        catch {
+            Set-FooterMessage -Message "复制失败，可改用鼠标选中后 Ctrl+C。"
+        }
+    })
     $OpenLogFolderButton.Add_Click({
         if (-not (Test-Path -LiteralPath $script:LogDirectory)) {
             [void](New-Item -ItemType Directory -Path $script:LogDirectory -Force)
@@ -944,7 +1165,9 @@ try {
                 $script:NextLocalRefreshAt = $now.AddSeconds(2)
             }
             if ($now -ge $script:NextLogRefreshAt) {
-                Update-LogView
+                if ($LogsPanel.Visibility -eq "Visible") {
+                    Update-LogView
+                }
                 $script:NextLogRefreshAt = $now.AddSeconds(5)
             }
             Start-StatusProbe

@@ -43,3 +43,9 @@ obj/
 *.user
 Desktop.ini
 Thumbs.db
+
+# 本地审计测量脚本与裁剪图（含本机截图，勿入库）
+docs/_audit/*.png
+
+# 本地审计产物与界面截图（含本机游戏名与使用时间线）
+docs/

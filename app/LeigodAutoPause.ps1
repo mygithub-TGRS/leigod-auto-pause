@@ -1024,6 +1024,24 @@ function Get-MonitorRuntimeState {
     }
 }
 
+function Format-UtcTimestamp {
+    <# 把时间统一渲染成 UTC ISO8601；空值渲染成空字符串，便于界面判断“没有这个信息”。 #>
+    param([AllowNull()]$Value)
+
+    if ($null -eq $Value) {
+        return ""
+    }
+    if ($Value -is [string]) {
+        return $Value
+    }
+    try {
+        return ([datetime]$Value).ToUniversalTime().ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    catch {
+        return ""
+    }
+}
+
 function Write-MonitorRuntimeState {
     param(
         [Parameter(Mandatory = $true)][string]$State,
@@ -1032,10 +1050,18 @@ function Write-MonitorRuntimeState {
         [Parameter(Mandatory = $true)][bool]$AutoDetectionEnabled,
         [Parameter(Mandatory = $true)][bool]$Force,
         [ref]$LastSignature,
-        [ref]$LastWriteAt
+        [ref]$LastWriteAt,
+        [datetime]$AccountCheckedAt = [datetime]::MinValue,
+        [string]$AccountMessage = "",
+        [string]$PausePhase = "",
+        $PauseDeadlineAt = $null,
+        $PauseRetryDeadlineAt = $null,
+        [string]$LastDecision = "",
+        $LastDecisionAt = $null,
+        [string]$LastError = ""
     )
 
-    $signature = "{0}|{1}|{2}|{3}|{4}|{5}" -f $State, $AccountState, $Activity.LaunchPending, $Activity.UnresolvedLaunch, ($Activity.TargetProcesses -join ","), ($Activity.RunningGames -join ",")
+    $signature = "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $State, $AccountState, $Activity.LaunchPending, $Activity.UnresolvedLaunch, ($Activity.TargetProcesses -join ","), ($Activity.RunningGames -join ","), $LastDecision, $PausePhase
     if (-not $Force -and
         $signature -eq [string]$LastSignature.Value -and
         ((Get-Date) - [datetime]$LastWriteAt.Value).TotalSeconds -lt 10) {
@@ -1051,19 +1077,28 @@ function Write-MonitorRuntimeState {
         return
     }
     $runtime = [ordered]@{
-        schema_version        = 1
-        updated_at            = (Get-Date).ToUniversalTime().ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
-        monitor_pid           = $PID
-        session_id            = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-        state                 = $State
-        account_state         = $AccountState
-        auto_detection        = $AutoDetectionEnabled
-        launch_pending        = [bool]$Activity.LaunchPending
-        unresolved_launch     = [bool]$Activity.UnresolvedLaunch
-        association_confirmed = [bool]$Activity.CanConfirmSession
-        target_processes      = [string[]]$Activity.TargetProcesses
-        automatic_processes   = [string[]]$Activity.AutomaticProcesses
-        running_games         = [string[]]$Activity.RunningGames
+        schema_version          = 2
+        updated_at              = (Get-Date).ToUniversalTime().ToString("o", [System.Globalization.CultureInfo]::InvariantCulture)
+        monitor_pid             = $PID
+        session_id              = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        state                   = $State
+        account_state           = $AccountState
+        account_checked_at      = (Format-UtcTimestamp -Value $(if ($AccountCheckedAt -eq [datetime]::MinValue) { $null } else { $AccountCheckedAt }))
+        account_message         = $AccountMessage
+        auto_detection          = $AutoDetectionEnabled
+        launch_pending          = [bool]$Activity.LaunchPending
+        unresolved_launch       = [bool]$Activity.UnresolvedLaunch
+        association_confirmed   = [bool]$Activity.CanConfirmSession
+        session_confirmed       = [bool]$Activity.CanConfirmSession
+        pause_phase             = $PausePhase
+        pause_deadline_at       = (Format-UtcTimestamp -Value $PauseDeadlineAt)
+        pause_retry_deadline_at = (Format-UtcTimestamp -Value $PauseRetryDeadlineAt)
+        last_decision           = $LastDecision
+        last_decision_at        = (Format-UtcTimestamp -Value $LastDecisionAt)
+        last_error              = $LastError
+        target_processes        = [string[]]$Activity.TargetProcesses
+        automatic_processes     = [string[]]$Activity.AutomaticProcesses
+        running_games           = [string[]]$Activity.RunningGames
     }
     $temporaryPath = "$($script:RuntimeStatePath).$PID.tmp"
     try {
@@ -1162,6 +1197,10 @@ function Invoke-PauseAfterFinalCheck {
         return "Stopped"
     }
 
+    # 最终复核必须看实时进程表：轮询用的 1 秒快照在这条路径上会把“刚启动的游戏”判成未运行，
+    # 而这里正是决定要不要暂停的最后一道闸门。
+    [void](Get-RunningProcessNameSet -Refresh)
+
     $latestToken = Get-LatestAccountToken -HttpLogDirectory $HttpLogDirectory
     if (-not $latestToken -or
         -not [string]::Equals($latestToken, $Token, [System.StringComparison]::Ordinal)) {
@@ -1204,6 +1243,7 @@ function Invoke-PauseAfterFinalCheck {
         return "Stopped"
     }
 
+    [void](Get-RunningProcessNameSet -Refresh)
     $immediateActivity = Get-GameActivity -Config $Config -LogDirectory $HttpLogDirectory -Tracker $LaunchTracker -RefreshTracker
     if ($immediateActivity.UnresolvedLaunch) {
         Write-MonitorLog -Level "WARN" -Message "账号复核后仍存在无法确认进程名的雷神游戏会话，本次不执行。"
@@ -1275,8 +1315,11 @@ function Invoke-CheckMode {
     }
     $token = Get-LatestAccountToken -HttpLogDirectory $HttpLogDirectory
     $accountState = "Unavailable"
+    $accountStateMessage = "未找到可用的账号凭据"
     if ($token) {
-        $accountState = (Get-LeigodAccountState -Token $token).State
+        $accountStatus = Get-LeigodAccountState -Token $token
+        $accountState = $accountStatus.State
+        $accountStateMessage = [string]$accountStatus.Message
     }
 
     $result = [pscustomobject]@{
@@ -1286,6 +1329,7 @@ function Invoke-CheckMode {
         HttpLogDirectory    = $(if ($SensitiveDetailsEnabled) { $HttpLogDirectory } else { [System.IO.Path]::GetFileName($HttpLogDirectory) })
         TokenFound          = [bool]$token
         AccountState        = $accountState
+        AccountStateMessage = [string]$accountStateMessage
         ConfiguredProcesses = [string[]]$(if ($SensitiveDetailsEnabled) { $Config.GameProcesses } else { @() })
         DetectedProcesses   = [string[]]$(if ($SensitiveDetailsEnabled) { $automaticProcesses } else { @() })
         RunningGames        = [string[]]$(if ($SensitiveDetailsEnabled) { $runningGames } else { @() })
@@ -1565,6 +1609,11 @@ function Start-LeigodMonitor {
         # 倒计时开始后，失败重试允许的最晚时间；超过后放弃本次暂停，避免把很久以前的会话在数小时后补暂停。
         $pauseAttemptExpiresAt = $null
         $lastLogPruneDate = [datetime]::MinValue
+        # 界面对齐用的结构化状态：账号检查时刻、最近一次暂停结论、最近一次错误。
+        $accountCheckedAt = [datetime]::MinValue
+        $lastDecision = ""
+        $lastDecisionAt = $null
+        $lastError = ""
 
         $manualSummary = $(if ($Config.GameProcesses.Count -gt 0) { $Config.GameProcesses -join ", " } else { "无" })
         Write-MonitorLog -Level "INFO" -Message ("监控已启动{0}。自动识别: {1}；手动补充: {2}" -f $(if ($DryRunEnabled) { "（dry-run）" } else { "" }), $(if ($Config.AutoDetectLaunchedGames) { "启用" } else { "关闭" }), $manualSummary)
@@ -1712,6 +1761,10 @@ function Start-LeigodMonitor {
                     $unknownStatusChecks = 0
                 }
                 $lastStatusCheck = $now
+                $accountCheckedAt = $now
+                if ($accountState -eq "Unknown" -and -not [string]::IsNullOrWhiteSpace($lastStatusMessage)) {
+                    $lastError = $lastStatusMessage
+                }
 
                 if ($accountState -ne $lastLoggedAccountState) {
                     if ($accountState -eq "Unknown") {
@@ -1788,6 +1841,8 @@ function Start-LeigodMonitor {
                     }
                     else {
                         Write-MonitorLog -Level "WARN" -Message "检测到游戏退出，但本轮游戏运行期间未确认账号正在计时，本次不执行。"
+                        $lastDecision = "SKIP_SESSION_NOT_CONFIRMED"
+                        $lastDecisionAt = Get-Date
                         $state = "Idle"
                         $deadline = $null
                         $countdownToken = $null
@@ -1798,6 +1853,8 @@ function Start-LeigodMonitor {
                 }
                 elseif ($state -eq "GameStarting" -and -not $activity.LaunchPending) {
                     Write-MonitorLog -Level "WARN" -Message "雷神启动等待已结束，但未确认目标游戏进程运行；将保留目标用于后续复核，本次不执行。"
+                    $lastDecision = "SKIP_PENDING_WITHOUT_RUNNING"
+                    $lastDecisionAt = Get-Date
                     $state = "Idle"
                     $deadline = $null
                     $countdownToken = $null
@@ -1841,6 +1898,8 @@ function Start-LeigodMonitor {
                 # eventRetentionSeconds 就放弃，避免几小时后对一次早已过期的会话补做暂停。
                 if ($null -ne $deadline -and $null -ne $pauseAttemptExpiresAt -and $now -gt $pauseAttemptExpiresAt) {
                     Write-MonitorLog -Level "WARN" -Message "自动暂停重试已超过安全等待窗口，放弃本次暂停。"
+                    $lastDecision = "SKIP_RETRY_WINDOW_EXPIRED"
+                    $lastDecisionAt = Get-Date
                     $state = "Idle"
                     $deadline = $null
                     $countdownToken = $null
@@ -1861,12 +1920,29 @@ function Start-LeigodMonitor {
                     }
                     elseif (-not $countdownToken) {
                         Write-MonitorLog -Level "WARN" -Message "倒计时结束，但无法取得当前登录凭据；本次不执行。"
+                        $lastDecision = "SKIP_NO_TOKEN"
+                        $lastDecisionAt = Get-Date
                         $state = "Idle"
                         $deadline = $null
                         $countdownToken = $null
                     }
                     else {
                         $pauseOutcome = Invoke-PauseAfterFinalCheck -Token $countdownToken -HttpLogDirectory $HttpLogDirectory -DryRunEnabled $DryRunEnabled -Config $Config -LaunchTracker $launchTracker -CountdownState $state
+                        # 把暂停结论落成稳定编码，界面和排障都靠它，而不是去解析中文日志。
+                        $decisionMap = @{
+                            "Completed"      = "PAUSED"
+                            "GameRunning"    = "SKIP_GAME_RUNNING"
+                            "GameStarting"   = "SKIP_GAME_STARTING"
+                            "ClientRunning"  = "SKIP_CLIENT_RUNNING"
+                            "UnresolvedGame" = "SKIP_UNRESOLVED_LAUNCH"
+                            "TokenChanged"   = "SKIP_TOKEN_CHANGED"
+                            "Stopped"        = "SKIP_STOP_REQUESTED"
+                            "Retry"          = "SKIP_ACCOUNT_UNKNOWN"
+                        }
+                        if ($decisionMap.ContainsKey([string]$pauseOutcome)) {
+                            $lastDecision = [string]$decisionMap[[string]$pauseOutcome]
+                            $lastDecisionAt = Get-Date
+                        }
                         if ($pauseOutcome -eq "Completed") {
                             $state = "Idle"
                             $deadline = $null
@@ -1940,7 +2016,8 @@ function Start-LeigodMonitor {
 
             # 直接复用本周期开头的 $activity；这里原来又完整跑了一遍 Get-GameActivity
             # （进程枚举 + 加速状态文件读取），属于每个周期都重复一次的劳动。
-            Write-MonitorRuntimeState -State $state -AccountState $accountState -Activity $activity -AutoDetectionEnabled $Config.AutoDetectLaunchedGames -Force $false -LastSignature ([ref]$lastRuntimeSignature) -LastWriteAt ([ref]$lastRuntimeWriteAt)
+            $runtimePausePhase = $(if ($null -ne $deadline) { $state } else { "" })
+            Write-MonitorRuntimeState -State $state -AccountState $accountState -Activity $activity -AutoDetectionEnabled $Config.AutoDetectLaunchedGames -Force $false -LastSignature ([ref]$lastRuntimeSignature) -LastWriteAt ([ref]$lastRuntimeWriteAt) -AccountCheckedAt $accountCheckedAt -AccountMessage $lastStatusMessage -PausePhase $runtimePausePhase -PauseDeadlineAt $deadline -PauseRetryDeadlineAt $pauseAttemptExpiresAt -LastDecision $lastDecision -LastDecisionAt $lastDecisionAt -LastError $lastError
             $lastClientRunning = $clientRunning
             $lastGameRunning = $gameRunning
             if ($CycleLimit -gt 0 -and $cycle -ge $CycleLimit) {

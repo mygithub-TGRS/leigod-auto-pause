@@ -25,7 +25,7 @@ foreach ($requiredParameter in @("UseBasicParsing", "MaximumRedirection")) {
 . $securityHelpers
 
 $parseErrors = @()
-Get-ChildItem -LiteralPath (Join-Path $projectRoot "app"), (Join-Path $projectRoot "tools") -Filter "*.ps1" -File | ForEach-Object {
+Get-ChildItem -LiteralPath $projectRoot -Recurse -Filter "*.ps1" -File | Where-Object { $_.FullName -notmatch '\\\.git\\' } | ForEach-Object {
     $tokens = $null
     $errors = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
@@ -40,7 +40,7 @@ if ($parseErrors.Count -gt 0) {
 # Windows PowerShell 5.1 依赖 UTF-8 BOM 才能正确读取脚本里的中文；缺 BOM 会让提示文案变成乱码，
 # 严重时还会连字符串引号一起吃掉导致语法错误。这里把它变成硬性检查，防止编辑器保存时丢 BOM。
 $missingBom = @()
-Get-ChildItem -LiteralPath (Join-Path $projectRoot "app"), (Join-Path $projectRoot "tools") -Filter "*.ps1" -File | ForEach-Object {
+Get-ChildItem -LiteralPath $projectRoot -Recurse -Filter "*.ps1" -File | Where-Object { $_.FullName -notmatch '\\\.git\\' } | ForEach-Object {
     $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
     if (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)) {
         $missingBom += $_.Name
@@ -52,6 +52,40 @@ if ($missingBom.Count -gt 0) {
 
 Get-Content -LiteralPath $configExample -Raw -Encoding UTF8 | ConvertFrom-Json | Out-Null
 [xml](Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8) | Out-Null
+
+# XAML ↔ 脚本契约：界面里的 x:Name 和资源 key 是 PowerShell 的硬依赖（FindName / FindResource），
+# 只做 XML 解析检查发现不了改名或删除，必须在提交前静态比对两边。
+$xamlDocument = [xml](Get-Content -LiteralPath $xamlPath -Raw -Encoding UTF8)
+$xmlNamespace = New-Object System.Xml.XmlNamespaceManager($xamlDocument.NameTable)
+$xmlNamespace.AddNamespace('p', 'http://schemas.microsoft.com/winfx/2006/xaml/presentation')
+$xmlNamespace.AddNamespace('x', 'http://schemas.microsoft.com/winfx/2006/xaml')
+$xamlNames = @($xamlDocument.SelectNodes('//*[@x:Name]', $xmlNamespace) |
+    ForEach-Object { $_.GetAttribute('Name', 'http://schemas.microsoft.com/winfx/2006/xaml') })
+$xamlKeys = @($xamlDocument.SelectNodes('//*[@x:Key]', $xmlNamespace) |
+    ForEach-Object { $_.GetAttribute('Key', 'http://schemas.microsoft.com/winfx/2006/xaml') })
+
+$uiScriptPath = Join-Path $projectRoot 'app\LeigodAutoPause.UI.ps1'
+$uiSource = Get-Content -LiteralPath $uiScriptPath -Raw -Encoding UTF8
+$controlBlockMatch = [regex]::Match($uiSource, '\$controlNames = @\(([\s\S]*?)\n\s*\)')
+if (-not $controlBlockMatch.Success) {
+    throw "无法从 LeigodAutoPause.UI.ps1 解析出 `$controlNames 清单。"
+}
+$requiredControlNames = @([regex]::Matches($controlBlockMatch.Groups[1].Value, '"([^"]+)"') |
+    ForEach-Object { $_.Groups[1].Value })
+if ($requiredControlNames.Count -lt 10) {
+    throw ("控件清单解析结果异常: {0} 项" -f $requiredControlNames.Count)
+}
+$missingControlNames = @($requiredControlNames | Where-Object { $xamlNames -notcontains $_ })
+if ($missingControlNames.Count -gt 0) {
+    throw ("XAML 缺少脚本依赖的控件: " + ($missingControlNames -join ", "))
+}
+foreach ($requiredKey in @(
+        'GreenBrush', 'AmberBrush', 'RedBrush', 'MutedBrush', 'WeakBrush',
+        'TextBrush', 'SurfaceStrongBrush', 'PrimaryButtonStyle', 'DangerButtonStyle')) {
+    if ($xamlKeys -notcontains $requiredKey) {
+        throw ("XAML 缺少脚本依赖的资源: " + $requiredKey)
+    }
+}
 
 & $powerShellPath -NoProfile -ExecutionPolicy Bypass -File $monitorScript -SelfTest
 if ($LASTEXITCODE -ne 0) {

@@ -15,9 +15,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # 取全历史：上传自检的 -IncludeHistory 需要它，浅克隆下只会看到最新一次提交。
+          fetch-depth: 0
       - name: Run Windows PowerShell release tests
         shell: cmd
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tools\Test.ps1
       - name: Verify upload safety
         shell: cmd
-        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tools\Verify-Upload.ps1
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\tools\Verify-Upload.ps1 -IncludeHistory
