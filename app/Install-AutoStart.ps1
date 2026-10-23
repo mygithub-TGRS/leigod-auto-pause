@@ -4,8 +4,15 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# 安装/刷新开机自启与桌面入口。
+#
+# 这个脚本在两种目录布局下都要能跑：
+#   1. 源码仓库：根目录有 LeigodAutoPause.exe、src\、tools\
+#   2. 发布包：只有 LeigodAutoPause.exe + app\（没有源码与构建脚本）
+# 所以构建只在“EXE 缺失且有构建脚本”时才尝试。
+
 $monitorScript = Join-Path $PSScriptRoot "LeigodAutoPause.ps1"
-$uiScript = Join-Path $PSScriptRoot "LeigodAutoPause.UI.ps1"
+$autoStartScript = Join-Path $PSScriptRoot "Set-AutoStart.ps1"
 $startScript = Join-Path $PSScriptRoot "Start-Monitor.ps1"
 $stopScript = Join-Path $PSScriptRoot "Stop-Monitor.ps1"
 $restartScript = Join-Path $PSScriptRoot "Restart-Monitor.ps1"
@@ -14,11 +21,9 @@ $configExample = Join-Path $PSScriptRoot "config.example.json"
 $configBootstrap = Join-Path $PSScriptRoot "ConfigBootstrap.ps1"
 $securityHelpers = Join-Path $PSScriptRoot "SecurityHelpers.ps1"
 $xamlPath = Join-Path $PSScriptRoot "ui\MainWindow.xaml"
+$iconPath = Join-Path $PSScriptRoot "ui\app.ico"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $launcherPath = Join-Path $projectRoot "LeigodAutoPause.exe"
-$buildScript = Join-Path $projectRoot "tools\Build.ps1"
-$launcherSource = Join-Path $projectRoot "src\Launcher.cs"
-$manifestPath = Join-Path $projectRoot "src\app.manifest"
 $startupDirectory = [Environment]::GetFolderPath("Startup")
 $shortcutPath = Join-Path $startupDirectory "Leigod Auto Pause.lnk"
 $desktopShortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "雷神自动暂停（非官方）.lnk"
@@ -32,10 +37,11 @@ if (-not (Test-Path -LiteralPath $securityHelpers -PathType Leaf)) {
 }
 . $securityHelpers
 $powerShellPath = Get-WindowsPowerShellPath
+
 $requiredSourcePaths = @(
-    $projectRoot, $PSScriptRoot, $monitorScript, $uiScript, $startScript,
+    $projectRoot, $PSScriptRoot, $monitorScript, $autoStartScript, $startScript,
     $stopScript, $restartScript, $configExample, $configBootstrap,
-    $securityHelpers, $xamlPath, $buildScript, $launcherSource, $manifestPath
+    $securityHelpers, $xamlPath, $iconPath
 )
 foreach ($requiredPath in $requiredSourcePaths) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
@@ -59,12 +65,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if (-not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
-    if (-not (Test-Path -LiteralPath $buildScript -PathType Leaf)) {
-        throw "找不到启动器和构建脚本: $launcherPath"
+    $buildScript = Join-Path $projectRoot "tools\Build.ps1"
+    $sourceDirectory = Join-Path $projectRoot "src"
+    if (-not (Test-Path -LiteralPath $buildScript -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) {
+        throw "找不到控制台 $launcherPath，且当前目录不含源码（src\）与构建脚本（tools\Build.ps1）。请使用完整发布包，或先在源码目录执行 tools\Build.ps1。"
     }
     & $powerShellPath -NoProfile -ExecutionPolicy Bypass -File $buildScript | Out-Null
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
-        throw "控制台启动器构建失败。"
+        throw "控制台构建失败。"
     }
 }
 

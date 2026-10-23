@@ -730,7 +730,7 @@
                         <Border Style="{StaticResource InnerCardStyle}" Padding="12,10" BorderBrush="#1B2A2C">
                             <CheckBox x:Name="AutoStartToggle" Style="{StaticResource ToggleSwitchStyle}" Content="开机自启" FontSize="12.5" />
                         </Border>
-                        <TextBlock Text="UI v1.1" FontSize="10" Foreground="{StaticResource WeakBrush}" Margin="4,9,0,0" />
+                        <TextBlock Text="v2.0 · C#" FontSize="10" Foreground="{StaticResource WeakBrush}" Margin="4,9,0,0" />
                     </StackPanel>
                 </Grid>
             </Border>
