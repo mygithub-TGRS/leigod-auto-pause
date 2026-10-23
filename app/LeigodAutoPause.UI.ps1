@@ -85,7 +85,7 @@ try {
         "LogSourceText", "LogMatchCountText", "LogSearchInput", "LogLevelCombo", "LogCopyButton",
         "DiagNavHost", "DiagIndicator", "DiagNavButton", "DiagPanel", "DiagRunButton", "DiagCopyButton",
         "DiagSummaryText", "DiagTokenText", "DiagAccountText", "DiagClientText", "DiagGameText", "DiagAdviceText",
-        "GameEmptyText"
+        "GameEmptyText", "NeverStartRuleText", "StaleSessionRuleText"
     )
     foreach ($controlName in $controlNames) {
         $control = $window.FindName($controlName)
@@ -134,7 +134,24 @@ try {
     $script:UiProcessNamesAt = [datetime]::MinValue
     $script:AutoStartState = $null
     $script:AutoStartCheckedAt = [datetime]::MinValue
+    $script:LastLogPlainText = ""
 
+    # 设置项的唯一清单：加载、保存、脏标记都遍历它。
+    # 新增一个设置项只需要三处：XAML 控件、这张表的一行、Read-MonitorConfig 的一行。
+    $script:SettingDescriptors = @(
+        @{ Key = "auto_detect_launched_games";   Control = "AutoDetectGamesToggle";    Kind = "bool"; Default = $true },
+        @{ Key = "pause_if_client_closes";       Control = "PauseOnClientCloseToggle"; Kind = "bool"; Default = $true },
+        @{ Key = "notifications";                Control = "NotificationsToggle";      Kind = "bool"; Default = $true },
+        @{ Key = "pause_if_game_never_starts";   Control = "NeverStartedToggle";       Kind = "bool"; Default = $false },
+        @{ Key = "pause_stale_session_on_start"; Control = "StaleSessionToggle";       Kind = "bool"; Default = $false },
+        @{ Key = "exit_grace_seconds";           Control = "ExitGraceInput";           Kind = "int";  Default = 120 },
+        @{ Key = "startup_grace_seconds";        Control = "StartupGraceInput";        Kind = "int";  Default = 300 }
+    )
+
+    function Get-SettingControl {
+        param([Parameter(Mandatory = $true)]$Descriptor)
+        return Get-Variable -Name $Descriptor.Control -Scope Script -ValueOnly
+    }
     function Get-ResourceBrush {
         param([Parameter(Mandatory = $true)][string]$Name)
         return $window.FindResource($Name)
@@ -359,13 +376,16 @@ try {
                 [void]$script:GameNames.Add($displayName)
             }
 
-            $AutoDetectGamesToggle.IsChecked = [bool](Get-ConfigValue -Object $script:Config -Name "auto_detect_launched_games" -DefaultValue $true)
-            $ExitGraceInput.Text = [string](Get-ConfigValue -Object $script:Config -Name "exit_grace_seconds" -DefaultValue 120)
-            $StartupGraceInput.Text = [string](Get-ConfigValue -Object $script:Config -Name "startup_grace_seconds" -DefaultValue 300)
-            $PauseOnClientCloseToggle.IsChecked = [bool](Get-ConfigValue -Object $script:Config -Name "pause_if_client_closes" -DefaultValue $true)
-            $NotificationsToggle.IsChecked = [bool](Get-ConfigValue -Object $script:Config -Name "notifications" -DefaultValue $true)
-            $NeverStartedToggle.IsChecked = [bool](Get-ConfigValue -Object $script:Config -Name "pause_if_game_never_starts" -DefaultValue $false)
-            $StaleSessionToggle.IsChecked = [bool](Get-ConfigValue -Object $script:Config -Name "pause_stale_session_on_start" -DefaultValue $false)
+            foreach ($descriptor in $script:SettingDescriptors) {
+                $control = Get-SettingControl -Descriptor $descriptor
+                $value = Get-ConfigValue -Object $script:Config -Name $descriptor.Key -DefaultValue $descriptor.Default
+                if ($descriptor.Kind -eq "bool") {
+                    $control.IsChecked = [bool]$value
+                }
+                else {
+                    $control.Text = [string]$value
+                }
+            }
             $script:SettingsDirty = $false
             $SettingsHintText.Text = "设置未修改"
         }
@@ -408,6 +428,8 @@ try {
         $GraceSummaryText.Text = "$exitGrace 秒"
         $ClientCloseRuleText.Text = $(if ($PauseOnClientCloseToggle.IsChecked) { "启用" } else { "关闭" })
         $GameCountText.Text = $(if ($AutoDetectGamesToggle.IsChecked) { "自动 + $($script:GameNames.Count) 个" } else { "仅 $($script:GameNames.Count) 个" })
+        $NeverStartRuleText.Text = $(if ($NeverStartedToggle.IsChecked) { "启用" } else { "关闭" })
+        $StaleSessionRuleText.Text = $(if ($StaleSessionToggle.IsChecked) { "启用" } else { "关闭" })
     }
 
     function Save-Configuration {
@@ -431,14 +453,19 @@ try {
                 $configObject[$property.Name] = $property.Value
             }
         }
-        $configObject["auto_detect_launched_games"]    = [bool]$AutoDetectGamesToggle.IsChecked
-        $configObject["game_processes"]                = [string[]]@($script:GameNames)
-        $configObject["startup_grace_seconds"]         = $startupGrace
-        $configObject["exit_grace_seconds"]            = $exitGrace
-        $configObject["pause_if_client_closes"]        = [bool]$PauseOnClientCloseToggle.IsChecked
-        $configObject["pause_if_game_never_starts"]    = [bool]$NeverStartedToggle.IsChecked
-        $configObject["pause_stale_session_on_start"]  = [bool]$StaleSessionToggle.IsChecked
-        $configObject["notifications"]                 = [bool]$NotificationsToggle.IsChecked
+        $configObject["game_processes"] = [string[]]@($script:GameNames)
+        foreach ($descriptor in $script:SettingDescriptors) {
+            $control = Get-SettingControl -Descriptor $descriptor
+            if ($descriptor.Kind -eq "bool") {
+                $configObject[$descriptor.Key] = [bool]$control.IsChecked
+                continue
+            }
+            $parsed = 0
+            if (-not [int]::TryParse([string]$control.Text, [ref]$parsed)) {
+                throw ("{0} 必须是整数。" -f $descriptor.Key)
+            }
+            $configObject[$descriptor.Key] = $parsed
+        }
 
         $temporaryPath = "$($script:ConfigPath).ui.tmp"
         try {
@@ -687,6 +714,73 @@ try {
         return $true
     }
 
+    function Set-LogDocument {
+        <# 把日志行渲染成带级别配色的 FlowDocument（RichTextBox 不支持 Text 属性）。 #>
+        param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Lines)
+
+        $document = New-Object System.Windows.Documents.FlowDocument
+        $document.PagePadding = New-Object System.Windows.Thickness(0)
+        $document.LineHeight = 18
+        $document.FontFamily = New-Object System.Windows.Media.FontFamily("Consolas, Microsoft YaHei UI")
+        $document.FontSize = 12
+
+        $infoBrush = Get-ResourceBrush -Name "MutedBrush"
+        $warnBrush = Get-ResourceBrush -Name "AmberBrush"
+        $errorBrush = Get-ResourceBrush -Name "RedBrush"
+        $okBrush = Get-ResourceBrush -Name "GreenBrush"
+
+        foreach ($line in $Lines) {
+            $paragraph = New-Object System.Windows.Documents.Paragraph
+            $paragraph.Margin = New-Object System.Windows.Thickness(0)
+            $paragraph.LineHeight = 18
+            $run = New-Object System.Windows.Documents.Run([string]$line)
+            if ($line -match '\[ERROR\]' -or $line -match 'DECISION:PAUSE_FAILED') {
+                $run.Foreground = $errorBrush
+            }
+            elseif ($line -match '\[WARN\]') {
+                $run.Foreground = $warnBrush
+            }
+            elseif ($line -match 'DECISION:PAUSED') {
+                $run.Foreground = $okBrush
+            }
+            elseif ($line -match '\[DECISION:') {
+                $run.Foreground = $warnBrush
+            }
+            else {
+                $run.Foreground = $infoBrush
+            }
+            [void]$paragraph.Inlines.Add($run)
+            [void]$document.Blocks.Add($paragraph)
+        }
+        $LogTextBox.Document = $document
+    }
+
+    function Get-ActivityHighlights {
+        <# 从日志里挑出关键事件，去掉级别前缀只留时间和内容，比原样复读最后 4 行有用。 #>
+        param(
+            [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Lines,
+            [int]$Count = 3
+        )
+
+        $keyPattern = '检测到游戏运行|游戏进程已退出|检测到游戏退出|暂停成功|暂停失败|客户端已关闭|收到停止标记|账号状态更新|账号状态无法确认|已按保留策略'
+        $picked = @()
+        for ($i = $Lines.Count - 1; $i -ge 0 -and $picked.Count -lt $Count; $i--) {
+            $line = [string]$Lines[$i]
+            if ($line -notmatch $keyPattern) {
+                continue
+            }
+            $time = ""
+            if ($line -match '^\[(?<stamp>[^\]]+)\]') {
+                $stamp = [string]$Matches['stamp']
+                if ($stamp.Length -ge 8) {
+                    $time = $stamp.Substring($stamp.Length - 8) + " "
+                }
+            }
+            $body = $line -replace '^\[[^\]]+\]\s*\[(INFO|WARN|ERROR)\]\s*', ''
+            $picked += ("· " + $time + $body)
+        }
+        return [string[]]$picked
+    }
     function Update-LogView {
         $snapshot = Get-LatestLogSnapshot -Count 200
         $LogSourceText.Text = $(if ($snapshot.FileName) { "来源: " + $snapshot.FileName } else { "暂无日志文件" })
@@ -706,26 +800,28 @@ try {
             else { "" })
 
         if ($filtered.Count -eq 0) {
-            if ($LogTextBox.Text -ne "暂无匹配的运行日志。") {
-                $LogTextBox.Text = "暂无匹配的运行日志。"
+            if ($script:LastLogPlainText -ne "暂无匹配的运行日志。") {
+                Set-LogDocument -Lines @("暂无匹配的运行日志。")
+                $script:LastLogPlainText = "暂无匹配的运行日志。"
             }
             $ActivityText.Text = "暂无活动记录"
             $LastEventText.Text = "暂无活动记录"
             return
         }
 
-        # 只有内容真的变了才重写 Text：无条件赋值会每 5 秒清掉滚动位置和选区，排障时没法看。
+        # 只有内容真的变了才重建文档：无条件重建会每 5 秒清掉滚动位置和选区，排障时没法看。
         $text = $filtered -join [Environment]::NewLine
-        if ($LogTextBox.Text -ne $text) {
+        if ($script:LastLogPlainText -ne $text) {
             $wasAtBottom = (($LogTextBox.ExtentHeight - $LogTextBox.VerticalOffset - $LogTextBox.ViewportHeight) -lt 2)
-            $LogTextBox.Text = $text
+            Set-LogDocument -Lines $filtered
+            $script:LastLogPlainText = $text
             if ($wasAtBottom) {
                 $LogTextBox.ScrollToEnd()
             }
         }
 
-        $recent = @($filtered | Select-Object -Last 4)
-        $ActivityText.Text = $recent -join [Environment]::NewLine
+        $highlights = @(Get-ActivityHighlights -Lines $filtered -Count 3)
+        $ActivityText.Text = $(if ($highlights.Count -gt 0) { $highlights -join [Environment]::NewLine } else { "暂无活动记录" })
         $LastEventText.Text = [string]$filtered[-1]
     }
 
@@ -1194,11 +1290,15 @@ try {
     $ExitGracePlusButton.Add_Click({ Adjust-NumberInput -TextBox $ExitGraceInput -Delta 10 -Minimum 10 -Maximum 3600 })
     $StartupGraceMinusButton.Add_Click({ Adjust-NumberInput -TextBox $StartupGraceInput -Delta -10 -Minimum 10 -Maximum 7200 })
     $StartupGracePlusButton.Add_Click({ Adjust-NumberInput -TextBox $StartupGraceInput -Delta 10 -Minimum 10 -Maximum 7200 })
-    $ExitGraceInput.Add_TextChanged({ Set-SettingsDirty; Update-RuleSummary })
-    $StartupGraceInput.Add_TextChanged({ Set-SettingsDirty })
-    foreach ($toggle in @($AutoDetectGamesToggle, $PauseOnClientCloseToggle, $NotificationsToggle, $NeverStartedToggle, $StaleSessionToggle)) {
-        $toggle.Add_Checked({ Set-SettingsDirty; Update-RuleSummary })
-        $toggle.Add_Unchecked({ Set-SettingsDirty; Update-RuleSummary })
+    foreach ($descriptor in $script:SettingDescriptors) {
+        $control = Get-SettingControl -Descriptor $descriptor
+        if ($descriptor.Kind -eq "bool") {
+            $control.Add_Checked({ Set-SettingsDirty; Update-RuleSummary })
+            $control.Add_Unchecked({ Set-SettingsDirty; Update-RuleSummary })
+        }
+        else {
+            $control.Add_TextChanged({ Set-SettingsDirty; Update-RuleSummary })
+        }
     }
 
     $SaveSettingsButton.Add_Click({
@@ -1224,7 +1324,7 @@ try {
     $LogLevelCombo.Add_SelectionChanged({ Update-LogView })
     $LogCopyButton.Add_Click({
         try {
-            [System.Windows.Clipboard]::SetText([string]$LogTextBox.Text)
+            [System.Windows.Clipboard]::SetText([string]$script:LastLogPlainText)
             Set-FooterMessage -Message "已复制当前日志视图。"
         }
         catch {

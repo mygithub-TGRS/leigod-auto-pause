@@ -32,6 +32,10 @@
         <SolidColorBrush x:Key="HoverOverlayDarkBrush" Color="#14000000" />
         <SolidColorBrush x:Key="VioletBrush" Color="#12C7A8" />
         <SolidColorBrush x:Key="AccentBrush" Color="#0EFDD3" />
+        <!-- 强调色只在这里定义一次；光晕/渐变都引用它 -->
+        <Color x:Key="AccentColor">#0EFDD3</Color>
+        <DropShadowEffect x:Key="AccentGlowEffect" Color="#0EFDD3" BlurRadius="8" ShadowDepth="0" Direction="0" Opacity="0.7" RenderingBias="Performance" />
+        <DropShadowEffect x:Key="HeaderGlowEffect" Color="#0EFDD3" BlurRadius="20" ShadowDepth="0" Direction="0" Opacity="0.22" RenderingBias="Performance" />
         <SolidColorBrush x:Key="GreenBrush" Color="#3DE0A2" />
         <SolidColorBrush x:Key="AmberBrush" Color="#F4B742" />
         <SolidColorBrush x:Key="RedBrush" Color="#FF5A63" />
@@ -350,6 +354,20 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <Style x:Key="LogRichTextBoxStyle" TargetType="RichTextBox">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="14,12" />
+            <Setter Property="FontFamily" Value="Consolas, Microsoft YaHei UI" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="#A3BAB6" />
+            <Setter Property="SelectionBrush" Value="#2E6E68" />
+            <Setter Property="IsReadOnly" Value="True" />
+            <Setter Property="IsDocumentEnabled" Value="False" />
+            <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+            <Setter Property="HorizontalScrollBarVisibility" Value="Auto" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        </Style>
         <Style x:Key="LogTextBoxStyle" TargetType="TextBox" BasedOn="{StaticResource DarkTextBoxStyle}">
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderThickness" Value="0" />
@@ -637,9 +655,9 @@
                         <StackPanel>
                             <TextBlock Text="后台监控" FontSize="10.5" Foreground="{StaticResource WeakBrush}" />
                             <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                <Grid Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center">
-                                    <Ellipse Width="8" Height="8" Fill="#1AFFFFFF" />
-                                    <Ellipse x:Name="SidebarStatusDot" Width="7" Height="7" Fill="{StaticResource WeakBrush}" />
+                                <Grid Width="19" Height="19" Margin="0,0,8,0" VerticalAlignment="Center">
+                                    <Ellipse Width="19" Height="19" Fill="#14FFFFFF" />
+                                    <Ellipse x:Name="SidebarStatusDot" Width="8" Height="8" Fill="{StaticResource WeakBrush}" />
                                 </Grid>
                                 <TextBlock x:Name="SidebarStatusText" Text="正在检查" FontSize="13.5" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" />
                             </StackPanel>
@@ -651,7 +669,7 @@
                             <Grid>
                                 <Border x:Name="OverviewIndicator" Width="3" Height="16" CornerRadius="2" Background="{StaticResource GreenBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="1,0,0,0">
                                     <Border.Effect>
-                                        <DropShadowEffect Color="#0EFDD3" BlurRadius="8" ShadowDepth="0" Direction="0" Opacity="0.7" RenderingBias="Performance" />
+                                        <StaticResource ResourceKey="AccentGlowEffect" />
                                     </Border.Effect>
                                 </Border>
                                 <Button x:Name="OverviewNavButton" Style="{StaticResource NavButtonStyle}" Foreground="{StaticResource TextBrush}">
@@ -666,7 +684,7 @@
                             <Grid>
                                 <Border x:Name="SettingsIndicator" Width="3" Height="16" CornerRadius="2" Background="{StaticResource GreenBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="1,0,0,0" Visibility="Collapsed">
                                     <Border.Effect>
-                                        <DropShadowEffect Color="#0EFDD3" BlurRadius="8" ShadowDepth="0" Direction="0" Opacity="0.7" RenderingBias="Performance" />
+                                        <StaticResource ResourceKey="AccentGlowEffect" />
                                     </Border.Effect>
                                 </Border>
                                 <Button x:Name="SettingsNavButton" Style="{StaticResource NavButtonStyle}">
@@ -681,7 +699,7 @@
                             <Grid>
                                 <Border x:Name="LogsIndicator" Width="3" Height="16" CornerRadius="2" Background="{StaticResource GreenBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="1,0,0,0" Visibility="Collapsed">
                                     <Border.Effect>
-                                        <DropShadowEffect Color="#0EFDD3" BlurRadius="8" ShadowDepth="0" Direction="0" Opacity="0.7" RenderingBias="Performance" />
+                                        <StaticResource ResourceKey="AccentGlowEffect" />
                                     </Border.Effect>
                                 </Border>
                                 <Button x:Name="LogsNavButton" Style="{StaticResource NavButtonStyle}">
@@ -695,7 +713,7 @@
                             <Grid>
                                 <Border x:Name="DiagIndicator" Width="3" Height="16" CornerRadius="2" Background="{StaticResource GreenBrush}" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="1,0,0,0" Visibility="Collapsed">
                                     <Border.Effect>
-                                        <DropShadowEffect Color="#0EFDD3" BlurRadius="8" ShadowDepth="0" Direction="0" Opacity="0.7" RenderingBias="Performance" />
+                                        <StaticResource ResourceKey="AccentGlowEffect" />
                                     </Border.Effect>
                                 </Border>
                                 <Button x:Name="DiagNavButton" Style="{StaticResource NavButtonStyle}">
@@ -723,6 +741,7 @@
             <Grid Grid.Row="1" Grid.Column="1">
 
                 <!-- ============================ Overview ============================ -->
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False">
                 <Grid x:Name="OverviewPanel" Margin="24,20,24,20">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto" />
@@ -882,12 +901,14 @@
                                 <TextBlock Text="当前规则" Style="{StaticResource SectionTitleStyle}" />
                                 <Grid Grid.Row="1" Margin="0,6,0,0">
                                     <Grid.RowDefinitions>
-                                        <RowDefinition Height="*" />
-                                        <RowDefinition Height="*" />
-                                        <RowDefinition Height="*" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
-                                    <Grid Grid.Row="0">
+                                    <Grid Grid.Row="0" Margin="0,3,0,3">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
@@ -897,7 +918,7 @@
                                     </Grid>
 
                                     <Border Grid.Row="1" BorderBrush="#0EFFFFFF" BorderThickness="0,1,0,1" />
-                                    <Grid Grid.Row="1">
+                                    <Grid Grid.Row="1" Margin="0,3,0,3">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
@@ -906,7 +927,7 @@
                                         <TextBlock x:Name="ClientCloseRuleText" Grid.Column="1" Text="启用" FontSize="13.5" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" />
                                     </Grid>
 
-                                    <Grid Grid.Row="2">
+                                    <Grid Grid.Row="2" Margin="0,3,0,3">
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*" />
                                             <ColumnDefinition Width="Auto" />
@@ -914,11 +935,31 @@
                                         <TextBlock Text="游戏识别" FontSize="11.5" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
                                         <TextBlock x:Name="GameCountText" Grid.Column="1" Text="自动 + 0 个" FontSize="13.5" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" />
                                     </Grid>
+
+                                    <Border Grid.Row="3" BorderBrush="#0EFFFFFF" BorderThickness="0,1,0,0" />
+                                    <Grid Grid.Row="3" Margin="0,3,0,3">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="未检测到游戏" FontSize="11.5" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
+                                        <TextBlock x:Name="NeverStartRuleText" Grid.Column="1" Text="关闭" FontSize="12.5" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" />
+                                    </Grid>
+
+                                    <Grid Grid.Row="4" Margin="0,3,0,3">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="遗留计时" FontSize="11.5" Foreground="{StaticResource MutedBrush}" VerticalAlignment="Center" />
+                                        <TextBlock x:Name="StaleSessionRuleText" Grid.Column="1" Text="关闭" FontSize="12.5" FontWeight="SemiBold" Foreground="{StaticResource TextBrush}" VerticalAlignment="Center" />
+                                    </Grid>
                                 </Grid>
                             </Grid>
                         </Border>
                     </Grid>
                 </Grid>
+                </ScrollViewer>
 
                 <!-- ============================ Settings ============================ -->
                 <Grid x:Name="SettingsPanel" Margin="24,20,24,20" Visibility="Collapsed">
@@ -1119,7 +1160,7 @@
                     <Border Grid.Row="2" Style="{StaticResource CardStyle}" CornerRadius="12" Padding="6">
                         <Grid>
                             <Border CornerRadius="6" Background="#070B0C" BorderBrush="#152123" BorderThickness="1" />
-                            <TextBox x:Name="LogTextBox" Style="{StaticResource LogTextBoxStyle}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" />
+                            <RichTextBox x:Name="LogTextBox" Style="{StaticResource LogRichTextBoxStyle}" />
                         </Grid>
                     </Border>
                 </Grid>
